@@ -55,6 +55,12 @@ const isGameAction = (value: string): value is GameAction =>
   value === 'pause' ||
   value === 'restart';
 
+const isEditableTarget = (target: EventTarget | null): boolean =>
+  target instanceof HTMLInputElement ||
+  target instanceof HTMLTextAreaElement ||
+  target instanceof HTMLSelectElement ||
+  (target instanceof HTMLElement && target.isContentEditable);
+
 export class InputController {
   private readonly keys = new Set<string>();
   private readonly heldActions = new Set<GameAction>();
@@ -63,6 +69,7 @@ export class InputController {
   private readonly keyVector = new THREE.Vector2();
   private readonly pointerAim = new THREE.Vector2();
   private pointerAimActive = false;
+  private enabled = true;
   private readonly buttonBindings: ButtonBinding[] = [];
   private readonly pointerState: PointerState = {
     active: false,
@@ -73,6 +80,7 @@ export class InputController {
   };
 
   private readonly onKeyDown = (event: KeyboardEvent) => {
+    if (!this.enabled || isEditableTarget(event.target)) return;
     if (!this.keys.has(event.code)) {
       const action = ACTION_BY_KEY[event.code];
       if (action) this.pressAction(action);
@@ -95,15 +103,11 @@ export class InputController {
   };
 
   private readonly onBlur = () => {
-    this.keys.clear();
-    this.heldActions.clear();
-    this.movementPointer.set(0, 0);
-    this.pointerState.active = false;
-    this.pointerState.id = null;
-    this.updateKnob();
+    this.reset();
   };
 
   private readonly onStickDown = (event: PointerEvent) => {
+    if (!this.enabled) return;
     event.preventDefault();
     const rect = this.stick.getBoundingClientRect();
     this.pointerState.active = true;
@@ -135,6 +139,7 @@ export class InputController {
   };
 
   private readonly onDashDown = (event: PointerEvent) => {
+    if (!this.enabled) return;
     event.preventDefault();
     this.pressAction('dodge');
   };
@@ -145,11 +150,13 @@ export class InputController {
   };
 
   private readonly onWindowPointerMove = (event: PointerEvent) => {
+    if (!this.enabled) return;
     if (event.pointerType !== 'mouse') return;
     this.updateAim(event.clientX, event.clientY);
   };
 
   private readonly onWindowPointerDown = (event: PointerEvent) => {
+    if (!this.enabled) return;
     const target = event.target;
     if (!(target instanceof HTMLCanvasElement)) return;
     this.updateAim(event.clientX, event.clientY);
@@ -169,6 +176,7 @@ export class InputController {
   };
 
   private readonly onIntentEvent = (event: Event) => {
+    if (!this.enabled) return;
     const detail = (event as CustomEvent<IntentEventDetail>).detail;
     if (!detail?.action || !isGameAction(detail.action)) return;
     if (detail.pressed === false) this.heldActions.delete(detail.action);
@@ -200,6 +208,7 @@ export class InputController {
   }
 
   readMovement(target: THREE.Vector2): THREE.Vector2 {
+    if (!this.enabled) return target.set(0, 0);
     this.keyVector.set(0, 0);
     if (this.keys.has('KeyA') || this.keys.has('ArrowLeft')) this.keyVector.x -= 1;
     if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) this.keyVector.x += 1;
@@ -212,21 +221,23 @@ export class InputController {
   }
 
   readAim(target: THREE.Vector2): THREE.Vector2 {
+    if (!this.enabled) return target.set(0, 0);
     return target.copy(this.pointerAim);
   }
 
   hasPointerAim(): boolean {
-    return this.pointerAimActive;
+    return this.enabled && this.pointerAimActive;
   }
 
   consume(action: GameAction): boolean {
+    if (!this.enabled) return false;
     const pressed = this.pressedActions.has(action);
     this.pressedActions.delete(action);
     return pressed;
   }
 
   isHeld(action: GameAction): boolean {
-    return this.heldActions.has(action);
+    return this.enabled && this.heldActions.has(action);
   }
 
   // Compatibility for the original prototype and external smoke tests.
@@ -235,6 +246,7 @@ export class InputController {
   }
 
   setVirtualIntent(action: GameAction, pressed = true): void {
+    if (!this.enabled) return;
     if (pressed) this.pressAction(action);
     else this.heldActions.delete(action);
   }
@@ -263,6 +275,24 @@ export class InputController {
       binding.element.removeEventListener('pointerleave', binding.up);
     }
     this.buttonBindings.length = 0;
+  }
+
+  setEnabled(enabled: boolean): void {
+    if (this.enabled === enabled) return;
+    this.enabled = enabled;
+    this.reset();
+  }
+
+  reset(): void {
+    this.keys.clear();
+    this.heldActions.clear();
+    this.pressedActions.clear();
+    this.movementPointer.set(0, 0);
+    this.pointerAim.set(0, 0);
+    this.pointerAimActive = false;
+    this.pointerState.active = false;
+    this.pointerState.id = null;
+    this.updateKnob();
   }
 
   private pressAction(action: GameAction): void {

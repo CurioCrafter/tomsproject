@@ -21,9 +21,15 @@ page.on('console', (message) => {
 });
 page.on('pageerror', (error) => pageErrors.push(error.message));
 
-await page.goto(url, { waitUntil: 'networkidle' });
-await page.locator('#enter-game').evaluate((element) => element.click());
-await page.locator('#title-veil').waitFor({ state: 'hidden', timeout: 2_000 }).catch(() => undefined);
+await page.goto(url, { waitUntil: 'domcontentloaded' });
+const begin = page.locator('#begin-pilgrimage');
+if (await begin.isVisible().catch(() => false)) {
+  await begin.click();
+  await page.locator('#front-end-layer').waitFor({ state: 'hidden', timeout: 2_000 }).catch(() => undefined);
+} else {
+  await page.locator('#enter-game').evaluate((element) => element.click());
+  await page.locator('#title-veil').waitFor({ state: 'hidden', timeout: 2_000 }).catch(() => undefined);
+}
 await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 10);
 
 const startedAt = Date.now();

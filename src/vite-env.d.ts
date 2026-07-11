@@ -34,5 +34,11 @@ interface Window {
     spawnBoss(): void;
     defeatBoss(): void;
     restart(): void;
+    activateNextEncounter(): void;
+    defeatActiveEncounter(): void;
+    claimAvailableCheckpoint(): void;
+    showEncounter(encounterId: string): void;
+    showSection(sectionId: string): void;
+    victoryTrade(): void;
   };
 }

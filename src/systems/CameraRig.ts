@@ -30,7 +30,13 @@ export class CameraRig {
     this.camera.lookAt(this.lookTarget);
   }
 
-  update(delta: number, target: THREE.Vector3, lag: number, combatTarget: THREE.Vector3 | null = null): void {
+  update(
+    delta: number,
+    target: THREE.Vector3,
+    lag: number,
+    combatTarget: THREE.Vector3 | null = null,
+    routeForward: THREE.Vector3 | null = null,
+  ): void {
     this.restoreOccluders();
     const portrait = this.camera.aspect < 0.82;
     const heightScale = portrait ? 1.32 : 1;
@@ -46,8 +52,10 @@ export class CameraRig {
     this.framedTarget.copy(target).addScaledVector(this.offset, 0);
     if (combatTarget) {
       this.framedTarget.lerp(combatTarget, portrait ? 0.15 : 0.24);
+      if (routeForward) this.framedTarget.addScaledVector(routeForward, portrait ? 0.45 : 0.8);
     } else {
-      this.framedTarget.z -= 2.2;
+      if (routeForward) this.framedTarget.addScaledVector(routeForward, portrait ? 2.7 : 3.4);
+      else this.framedTarget.z -= 2.2;
     }
     this.framedTarget.y += 0.72;
     this.lookTarget.lerp(this.framedTarget, 1 - Math.exp(-delta * 12));

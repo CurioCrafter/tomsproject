@@ -1,7 +1,26 @@
 import * as THREE from 'three';
 import { MaterialLibrary } from './MaterialLibrary';
 
-export type EnemyVariant = 'veilWraith' | 'astralSentinel' | 'rimeStalker';
+export type EnemyVariant =
+  | 'wisp'
+  | 'sentinel'
+  | 'seer'
+  | 'veilWraith'
+  | 'astralSentinel'
+  | 'rimeStalker'
+  | 'ashenInitiate'
+  | 'astralLancer'
+  | 'eclipseChorister'
+  | 'orreryCastellan';
+
+export type SorcererAppearanceOptions = {
+  lifeStage?: 'young' | 'mature' | 'elder';
+  frame?: 'slender' | 'balanced' | 'broad';
+  veil?: 'hood' | 'starVeil' | 'hornedCowl' | 'unveiled';
+  robeColor?: THREE.ColorRepresentation;
+  metalColor?: THREE.ColorRepresentation;
+  catalyst?: 'crescent' | 'orb' | 'astrolabe' | 'bare';
+};
 
 export type ModelDiagnostics = {
   meshes: number;
@@ -35,6 +54,18 @@ class ModelBuilder {
   geometry<T extends THREE.BufferGeometry>(geometry: T): T {
     this.geometries.add(geometry);
     return geometry;
+  }
+
+  cloneMaterial<T extends THREE.Material>(
+    source: T,
+    name: string,
+    configure?: (material: T) => void,
+  ): T {
+    const material = source.clone() as T;
+    material.name = name;
+    configure?.(material);
+    this.ownedMaterials.add(material);
+    return material;
   }
 
   mesh(
@@ -159,9 +190,48 @@ function addSocket(builder: ModelBuilder, name: string, parent: THREE.Object3D, 
   return socket;
 }
 
-export function createSorcererModel(materials: MaterialLibrary): AuthoredModel {
+export function createSorcererModel(
+  materials: MaterialLibrary,
+  appearance: SorcererAppearanceOptions = {},
+): AuthoredModel {
   const builder = new ModelBuilder('sorcerer');
   const silhouette = builder.group('sorcererSilhouette');
+  const lifeStage = appearance.lifeStage ?? 'mature';
+  const frame = appearance.frame ?? 'balanced';
+  const veil = appearance.veil ?? 'hood';
+  const catalyst = appearance.catalyst ?? 'crescent';
+  const heightScale = lifeStage === 'young' ? 0.93 : lifeStage === 'elder' ? 1.04 : 1;
+  const widthScale = frame === 'slender' ? 0.84 : frame === 'broad' ? 1.18 : 1;
+  const depthScale = frame === 'slender' ? 0.9 : frame === 'broad' ? 1.08 : 1;
+
+  const robeMaterial = appearance.robeColor === undefined
+    ? materials.get<THREE.MeshStandardMaterial>('robe')
+    : builder.cloneMaterial(
+      materials.get<THREE.MeshStandardMaterial>('robe'),
+      'material.sorcererRobe.custom',
+      (material) => {
+        material.color.set(appearance.robeColor!);
+        material.emissive.copy(material.color).multiplyScalar(0.18);
+        material.emissiveIntensity = 0.3;
+      },
+    );
+  const goldMaterial = appearance.metalColor === undefined
+    ? materials.get<THREE.MeshStandardMaterial>('celestialGold')
+    : builder.cloneMaterial(
+      materials.get<THREE.MeshStandardMaterial>('celestialGold'),
+      'material.sorcererMetal.custom',
+      (material) => {
+        material.color.set(appearance.metalColor!);
+        material.emissive.copy(material.color).multiplyScalar(0.2);
+      },
+    );
+  const silverMaterial = appearance.metalColor === undefined
+    ? materials.get<THREE.MeshStandardMaterial>('lunarSilver')
+    : builder.cloneMaterial(
+      materials.get<THREE.MeshStandardMaterial>('lunarSilver'),
+      'material.sorcererCatalystMetal.custom',
+      (material) => material.color.set(appearance.metalColor!),
+    );
 
   const robeProfile = [
     new THREE.Vector2(0.72, 0),
@@ -170,13 +240,13 @@ export function createSorcererModel(materials: MaterialLibrary): AuthoredModel {
     new THREE.Vector2(0.42, 1.52),
     new THREE.Vector2(0.28, 1.72),
   ];
-  const robe = builder.mesh('layeredRobe', new THREE.LatheGeometry(robeProfile, 14), materials.get('robe'), silhouette);
+  const robe = builder.mesh('layeredRobe', new THREE.LatheGeometry(robeProfile, 14), robeMaterial, silhouette);
   robe.position.y = 0.06;
 
   const hem = builder.mesh(
     'goldHem',
     new THREE.TorusGeometry(0.67, 0.045, 6, 28),
-    materials.get('celestialGold'),
+    goldMaterial,
     silhouette,
   );
   hem.rotation.x = Math.PI / 2;
@@ -185,79 +255,226 @@ export function createSorcererModel(materials: MaterialLibrary): AuthoredModel {
   const mantle = builder.mesh(
     'starMantle',
     new THREE.SphereGeometry(0.54, 18, 10, 0, Math.PI * 2, 0, Math.PI * 0.46),
-    materials.get('robe'),
+    robeMaterial,
     silhouette,
   );
   mantle.position.y = 1.62;
   mantle.scale.set(1.35, 0.72, 1);
 
-  const mask = builder.mesh('moonMask', new THREE.IcosahedronGeometry(0.26, 1), materials.get('moonstone'), silhouette);
-  mask.position.set(0, 1.82, -0.12);
-  mask.scale.set(0.75, 1.05, 0.55);
-
-  const hood = builder.mesh(
-    'deepHood',
-    new THREE.TorusGeometry(0.32, 0.13, 8, 20, Math.PI * 1.65),
-    materials.get('robe'),
+  const faceMaterial = veil === 'unveiled'
+    ? builder.cloneMaterial(
+      materials.get<THREE.MeshStandardMaterial>('leather'),
+      'material.sorcererFace',
+      (material) => {
+        material.color.set(lifeStage === 'elder' ? '#8e6b61' : '#b98b75');
+        material.roughness = 0.82;
+      },
+    )
+    : materials.get('moonstone');
+  const mask = builder.mesh(
+    veil === 'unveiled' ? 'unveiledFace' : 'moonMask',
+    veil === 'unveiled' ? new THREE.SphereGeometry(0.25, 14, 10) : new THREE.IcosahedronGeometry(0.26, 1),
+    faceMaterial,
     silhouette,
   );
-  hood.position.set(0, 1.84, -0.02);
-  hood.rotation.z = Math.PI * 0.68;
+  mask.position.set(0, 1.82, -0.29);
+  mask.scale.set(0.75, 1.05, veil === 'unveiled' ? 0.72 : 0.58);
+
+  const veilRoot = builder.group('veilRoot', silhouette);
+  veilRoot.position.set(0, 1.84, -0.02);
+  if (veil === 'hood') {
+    const hood = builder.mesh(
+      'deepHood',
+      new THREE.TorusGeometry(0.32, 0.13, 8, 20, Math.PI * 1.65),
+      robeMaterial,
+      veilRoot,
+    );
+    hood.rotation.z = Math.PI * 0.68;
+  } else if (veil === 'starVeil') {
+    const circlet = builder.mesh(
+      'starVeilCirclet',
+      new THREE.TorusGeometry(0.3, 0.055, 7, 22),
+      goldMaterial,
+      veilRoot,
+    );
+    circlet.rotation.x = Math.PI / 2;
+    const drape = builder.mesh(
+      'starVeilDrape',
+      new THREE.ConeGeometry(0.39, 0.82, 9, 2, true, 0, Math.PI * 1.52),
+      robeMaterial,
+      veilRoot,
+    );
+    drape.position.set(0, -0.23, 0.17);
+    drape.rotation.y = Math.PI * 0.24;
+  } else if (veil === 'hornedCowl') {
+    const cowl = builder.mesh(
+      'hornedCowl',
+      new THREE.TorusGeometry(0.32, 0.14, 8, 20, Math.PI * 1.65),
+      robeMaterial,
+      veilRoot,
+    );
+    cowl.rotation.z = Math.PI * 0.68;
+    for (const side of [-1, 1]) {
+      const horn = builder.mesh(
+        `${side < 0 ? 'left' : 'right'}CowlHorn`,
+        new THREE.ConeGeometry(0.075, 0.45, 5),
+        goldMaterial,
+        veilRoot,
+      );
+      horn.position.set(side * 0.28, 0.24, 0.02);
+      horn.rotation.z = side * -0.48;
+    }
+  }
+
+  if (lifeStage === 'young') {
+    const noviceStar = builder.mesh(
+      'noviceBrowStar',
+      new THREE.OctahedronGeometry(0.07, 0),
+      materials.get('spirit'),
+      mask,
+      false,
+    );
+    noviceStar.position.set(0, 0.08, -0.22);
+  } else if (lifeStage === 'elder') {
+    const elderCrescent = builder.mesh(
+      'elderBrowCrescent',
+      new THREE.TorusGeometry(0.16, 0.025, 6, 18, Math.PI * 1.45),
+      goldMaterial,
+      mask,
+      false,
+    );
+    elderCrescent.position.set(0, 0.08, -0.22);
+    elderCrescent.rotation.z = Math.PI * 0.76;
+    silhouette.rotation.x = -0.035;
+  }
 
   const leftArm = builder.group('leftArmJoint', silhouette);
   leftArm.position.set(-0.39, 1.42, 0);
   leftArm.rotation.z = 0.56;
-  addBeam(builder, leftArm, 'leftSleeve', new THREE.Vector3(0, 0, 0), new THREE.Vector3(-0.48, -0.42, -0.08), 0.16, materials.get('robe'));
-  const leftCuff = builder.mesh('leftCuff', new THREE.TorusGeometry(0.13, 0.035, 6, 14), materials.get('celestialGold'), leftArm);
+  addBeam(builder, leftArm, 'leftSleeve', new THREE.Vector3(0, 0, 0), new THREE.Vector3(-0.48, -0.42, -0.08), 0.16, robeMaterial);
+  const leftCuff = builder.mesh('leftCuff', new THREE.TorusGeometry(0.13, 0.035, 6, 14), goldMaterial, leftArm);
   leftCuff.position.set(-0.48, -0.42, -0.08);
   leftCuff.rotation.set(Math.PI / 2, 0.6, 0);
 
   const rightArm = builder.group('rightArmJoint', silhouette);
   rightArm.position.set(0.38, 1.44, 0);
   rightArm.rotation.z = -0.38;
-  addBeam(builder, rightArm, 'rightSleeve', new THREE.Vector3(0, 0, 0), new THREE.Vector3(0.45, -0.3, -0.05), 0.16, materials.get('robe'));
+  addBeam(builder, rightArm, 'rightSleeve', new THREE.Vector3(0, 0, 0), new THREE.Vector3(0.45, -0.3, -0.05), 0.16, robeMaterial);
 
-  const staff = builder.group('crescentStaff', silhouette);
-  staff.position.set(0.82, 0.1, -0.02);
+  const staff = builder.group(
+    catalyst === 'crescent'
+      ? 'crescentStaff'
+      : catalyst === 'orb'
+        ? 'orbStaff'
+        : catalyst === 'bare'
+          ? 'bareHandFocus'
+          : 'astrolabeStaff',
+    silhouette,
+  );
+  const focusHeight = catalyst === 'bare' ? 1.04 : 1.98;
+  staff.position.set(catalyst === 'bare' ? 0.42 : 0.82, catalyst === 'bare' ? 0.44 : 0.1, catalyst === 'bare' ? -0.22 : -0.02);
   const staffCurve = new THREE.CatmullRomCurve3([
     new THREE.Vector3(0, 0, 0),
     new THREE.Vector3(-0.04, 0.58, 0.03),
     new THREE.Vector3(0.05, 1.18, -0.02),
     new THREE.Vector3(0, 1.8, 0),
   ]);
-  builder.mesh('staffShaft', new THREE.TubeGeometry(staffCurve, 18, 0.045, 7, false), materials.get('lunarSilver'), staff);
-  const crescent = builder.mesh(
-    'staffCrescent',
-    new THREE.TorusGeometry(0.3, 0.045, 7, 24, Math.PI * 1.55),
-    materials.get('celestialGold'),
+  if (catalyst !== 'bare') {
+    builder.mesh('staffShaft', new THREE.TubeGeometry(staffCurve, 18, 0.045, 7, false), silverMaterial, staff);
+  }
+  const catalystRings: THREE.Mesh[] = [];
+  if (catalyst === 'crescent') {
+    const crescent = builder.mesh(
+      'staffCrescent',
+      new THREE.TorusGeometry(0.3, 0.045, 7, 24, Math.PI * 1.55),
+      goldMaterial,
+      staff,
+    );
+    crescent.position.y = 1.98;
+    crescent.rotation.z = Math.PI * 0.72;
+    catalystRings.push(crescent);
+  } else if (catalyst === 'orb') {
+    const orbit = builder.mesh(
+      'staffOrbitalRing',
+      new THREE.TorusGeometry(0.24, 0.035, 7, 24),
+      goldMaterial,
+      staff,
+    );
+    orbit.position.y = 1.98;
+    orbit.rotation.x = Math.PI / 2;
+    catalystRings.push(orbit);
+  } else if (catalyst === 'bare') {
+    [0.22, 0.15].forEach((radius, index) => {
+      const ring = builder.mesh(
+        `bareFocusRing.${index}`,
+        new THREE.TorusGeometry(radius, 0.024, 6, 22),
+        index === 0 ? goldMaterial : silverMaterial,
+        staff,
+      );
+      ring.position.y = focusHeight;
+      ring.rotation.set(index * 0.8, Math.PI / 2, index * 0.55);
+      catalystRings.push(ring);
+    });
+  } else {
+    [0.31, 0.23, 0.16].forEach((radius, index) => {
+      const ring = builder.mesh(
+        `staffAstrolabeRing.${index}`,
+        new THREE.TorusGeometry(radius, 0.025, 6, 22),
+        index === 1 ? silverMaterial : goldMaterial,
+        staff,
+      );
+      ring.position.y = 1.98;
+      ring.rotation.set(index * 0.62, index * 0.48, index * 0.34);
+      catalystRings.push(ring);
+    });
+  }
+  const staffCore = builder.mesh(
+    'staffCore',
+    catalyst === 'orb' || catalyst === 'bare' ? new THREE.IcosahedronGeometry(catalyst === 'bare' ? 0.14 : 0.17, 1) : new THREE.OctahedronGeometry(0.13, 1),
+    materials.get('moonstone'),
     staff,
   );
-  crescent.position.y = 1.98;
-  crescent.rotation.z = Math.PI * 0.72;
-  const staffCore = builder.mesh('staffCore', new THREE.OctahedronGeometry(0.13, 1), materials.get('moonstone'), staff);
-  staffCore.position.y = 1.98;
+  staffCore.position.y = focusHeight;
+  const catalystRingBaseRotations = catalystRings.map((ring) => ring.rotation.clone());
 
   const belt = builder.mesh('constellationBelt', new THREE.TorusGeometry(0.47, 0.055, 7, 24), materials.get('leather'), silhouette);
   belt.rotation.x = Math.PI / 2;
   belt.position.y = 1.06;
   for (let i = 0; i < 5; i += 1) {
-    const charm = builder.mesh(`beltCharm.${i}`, new THREE.OctahedronGeometry(0.055, 0), materials.get('celestialGold'), silhouette);
+    const charm = builder.mesh(`beltCharm.${i}`, new THREE.OctahedronGeometry(0.055, 0), goldMaterial, silhouette);
     const angle = (i / 4 - 0.5) * 1.8;
     charm.position.set(Math.sin(angle) * 0.47, 0.91 - Math.abs(i - 2) * 0.025, -Math.cos(angle) * 0.47);
   }
 
-  addContactShadow(builder, materials, 0.82, 0.68);
-  const castSocket = addSocket(builder, 'castSocket', staff, new THREE.Vector3(0, 1.98, 0));
+  const contactShadow = addContactShadow(builder, materials, 0.82 * widthScale, 0.68 * depthScale);
+  contactShadow.name = 'sorcererContactShadow';
+  const castSocket = addSocket(builder, 'castSocket', staff, new THREE.Vector3(0, focusHeight, 0));
   const dodgeSocket = addSocket(builder, 'dodgeSocket', silhouette, new THREE.Vector3(0, 0.85, 0.2));
-  const collision = builder.collision('collisionProxy', new THREE.CapsuleGeometry(0.48, 1.12, 4, 8));
-  collision.position.y = 1;
+  silhouette.scale.set(widthScale, heightScale, depthScale);
+  const collision = builder.collision(
+    'collisionProxy',
+    new THREE.CapsuleGeometry(0.48 * Math.max(widthScale, depthScale), 1.12 * heightScale, 4, 8),
+  );
+  collision.position.y = heightScale;
 
   return builder.finish(collision, { cast: castSocket, dodge: dodgeSocket }, (_delta, elapsed, intensity) => {
     staffCore.rotation.y = elapsed * 2.4;
     staffCore.scale.setScalar(0.92 + Math.sin(elapsed * 4.2) * 0.08 * intensity);
-    crescent.rotation.y = Math.sin(elapsed * 1.3) * 0.08;
+    catalystRings.forEach((ring, index) => {
+      const base = catalystRingBaseRotations[index];
+      if (catalyst === 'crescent') {
+        ring.rotation.set(base.x, base.y + Math.sin(elapsed * 1.3) * 0.08, base.z);
+      } else {
+        ring.rotation.set(
+          base.x + Math.sin(elapsed * (0.65 + index * 0.12)) * 0.12,
+          base.y + elapsed * (index % 2 === 0 ? 0.32 : -0.27) * intensity,
+          base.z + Math.sin(elapsed * (0.82 + index * 0.09)) * 0.09,
+        );
+      }
+    });
     mantle.rotation.y = Math.sin(elapsed * 0.7) * 0.045;
     leftArm.rotation.x = Math.sin(elapsed * 1.6) * 0.045;
+    veilRoot.rotation.y = Math.sin(elapsed * 0.82) * 0.018;
   });
 }
 
@@ -408,11 +625,322 @@ export function createRimeStalkerEnemy(materials: MaterialLibrary): AuthoredMode
   });
 }
 
+export function createAshenInitiateEnemy(materials: MaterialLibrary): AuthoredModel {
+  const builder = new ModelBuilder('enemy.ashenInitiate');
+  const body = builder.group('ashenInitiateBody');
+  const emberMaterial = builder.cloneMaterial(
+    materials.get<THREE.MeshStandardMaterial>('danger'),
+    'material.ashenInitiateEmber',
+    (material) => {
+      material.color.set('#d66538');
+      material.emissive.set('#7a1e08');
+      material.emissiveIntensity = 1.15;
+    },
+  );
+  const robeProfile = [
+    new THREE.Vector2(0.54, 0),
+    new THREE.Vector2(0.48, 0.24),
+    new THREE.Vector2(0.32, 1.08),
+    new THREE.Vector2(0.25, 1.35),
+  ];
+  const robe = builder.mesh('ashLayeredRobe', new THREE.LatheGeometry(robeProfile, 10), materials.get('robe'), body);
+  robe.position.y = 0.06;
+  const mantle = builder.mesh(
+    'charredMantle',
+    new THREE.SphereGeometry(0.42, 12, 7, 0, Math.PI * 2, 0, Math.PI * 0.42),
+    materials.get('blackSlate'),
+    body,
+  );
+  mantle.position.y = 1.3;
+  mantle.scale.set(1.3, 0.68, 0.92);
+  const cowl = builder.mesh(
+    'ashCowl',
+    new THREE.TorusGeometry(0.25, 0.1, 7, 16, Math.PI * 1.6),
+    materials.get('void'),
+    body,
+  );
+  cowl.position.set(0, 1.5, -0.02);
+  cowl.rotation.z = Math.PI * 0.7;
+  const mask = builder.mesh('emberSlitMask', new THREE.IcosahedronGeometry(0.2, 0), materials.get('lunarSilver'), body);
+  mask.position.set(0, 1.48, -0.22);
+  mask.scale.set(0.72, 1.02, 0.42);
+  const emberSlit = builder.mesh('telegraphEmberSlit', new THREE.BoxGeometry(0.18, 0.035, 0.025), emberMaterial, mask, false);
+  emberSlit.position.z = -0.18;
+
+  const crozier = builder.group('charredCrozierJoint', body);
+  crozier.position.set(0.48, 0.2, 0.02);
+  addBeam(
+    builder,
+    crozier,
+    'charredCrozierShaft',
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(0.05, 1.52, 0),
+    0.04,
+    materials.get('leather'),
+    6,
+  );
+  const brazier = builder.mesh('crozierBrazier', new THREE.TorusGeometry(0.19, 0.04, 6, 18), materials.get('celestialGold'), crozier);
+  brazier.position.set(0.05, 1.61, 0);
+  brazier.rotation.x = Math.PI / 2;
+  const ember = builder.mesh('crozierTelegraphEmber', new THREE.OctahedronGeometry(0.1, 0), emberMaterial, crozier, false);
+  ember.position.set(0.05, 1.62, 0);
+
+  addContactShadow(builder, materials, 0.58, 0.5);
+  const hitSocket = addSocket(builder, 'hitSocket', body, new THREE.Vector3(0, 0.92, 0));
+  const castSocket = addSocket(builder, 'castSocket', ember, new THREE.Vector3());
+  const collision = builder.collision('collisionProxy', new THREE.CapsuleGeometry(0.42, 0.78, 4, 7));
+  collision.position.y = 0.82;
+
+  return builder.finish(collision, { hit: hitSocket, cast: castSocket }, (_delta, elapsed, intensity) => {
+    body.position.y = 0.04 + Math.sin(elapsed * 2.7) * 0.045;
+    crozier.rotation.z = -0.08 + Math.sin(elapsed * 1.8) * 0.055;
+    ember.rotation.y = elapsed * 2.8;
+    ember.scale.setScalar(0.82 + Math.sin(elapsed * 7.2) * 0.12 + intensity * 0.08);
+    mantle.rotation.y = Math.sin(elapsed * 1.1) * 0.045;
+  });
+}
+
+export function createAstralLancerEnemy(materials: MaterialLibrary): AuthoredModel {
+  const builder = new ModelBuilder('enemy.astralLancer');
+  const body = builder.group('astralLancerBody');
+  const telegraphMaterial = builder.cloneMaterial(
+    materials.get<THREE.MeshStandardMaterial>('danger'),
+    'material.astralLancerTelegraph',
+    (material) => {
+      material.color.set('#ff704f');
+      material.emissive.set('#8e1608');
+      material.emissiveIntensity = 1.4;
+    },
+  );
+
+  const breastplate = builder.mesh('longBreastplate', new THREE.DodecahedronGeometry(0.52, 0), materials.get('blackSlate'), body);
+  breastplate.position.y = 1.18;
+  breastplate.scale.set(0.72, 1.45, 0.62);
+  const helm = builder.mesh('needleHelm', new THREE.OctahedronGeometry(0.29, 0), materials.get('lunarSilver'), body);
+  helm.position.y = 2.08;
+  helm.scale.set(0.74, 1.24, 0.7);
+  const visor = builder.mesh('lancerVisor', new THREE.BoxGeometry(0.3, 0.055, 0.04), telegraphMaterial, helm, false);
+  visor.position.set(0, 0, -0.22);
+  for (const side of [-1, 1]) {
+    const pauldron = builder.mesh(
+      `${side < 0 ? 'left' : 'right'}StarPauldron`,
+      new THREE.ConeGeometry(0.2, 0.58, 5),
+      materials.get('slateEdge'),
+      body,
+    );
+    pauldron.position.set(side * 0.53, 1.42, 0);
+    pauldron.rotation.z = side * -Math.PI / 2;
+  }
+
+  const lance = builder.group('astralLanceJoint', body);
+  lance.position.set(0.56, 1.18, -0.08);
+  addBeam(
+    builder,
+    lance,
+    'astralLanceShaft',
+    new THREE.Vector3(0, 0, 0.35),
+    new THREE.Vector3(0, -0.06, -1.95),
+    0.045,
+    materials.get('lunarSilver'),
+    7,
+  );
+  const lanceTip = builder.mesh('lanceTelegraphTip', new THREE.ConeGeometry(0.17, 0.62, 5), telegraphMaterial, lance);
+  lanceTip.position.set(0, -0.07, -2.23);
+  lanceTip.rotation.x = -Math.PI / 2;
+  const lanceRing = builder.mesh('lanceFocusRing', new THREE.TorusGeometry(0.18, 0.028, 6, 18), materials.get('celestialGold'), lance);
+  lanceRing.position.set(0, -0.05, -1.86);
+  lanceRing.rotation.x = Math.PI / 2;
+
+  const shield = builder.group('kiteShieldJoint', body);
+  shield.position.set(-0.62, 1.03, -0.12);
+  const shieldPlate = builder.mesh('constellationKiteShield', new THREE.CylinderGeometry(0.5, 0.35, 0.12, 6), materials.get('slateEdge'), shield);
+  shieldPlate.rotation.z = Math.PI / 2;
+  shieldPlate.scale.y = 1.35;
+  const shieldRune = builder.mesh('shieldWarningRune', new THREE.TorusGeometry(0.22, 0.035, 6, 18), telegraphMaterial, shield, false);
+  shieldRune.position.x = -0.08;
+  shieldRune.rotation.y = Math.PI / 2;
+
+  addContactShadow(builder, materials, 0.72, 0.62);
+  const hitSocket = addSocket(builder, 'hitSocket', breastplate, new THREE.Vector3(0, 0, -0.45));
+  const castSocket = addSocket(builder, 'castSocket', lanceTip, new THREE.Vector3(0, 0.31, 0));
+  const collision = builder.collision('collisionProxy', new THREE.CapsuleGeometry(0.5, 1.18, 4, 8));
+  collision.position.y = 1.14;
+
+  return builder.finish(collision, { hit: hitSocket, cast: castSocket }, (_delta, elapsed, intensity) => {
+    body.position.y = 0.08 + Math.sin(elapsed * 2.2) * 0.055;
+    lance.position.z = -Math.max(0, Math.sin(elapsed * 2.4)) * 0.08 * intensity;
+    lanceTip.scale.setScalar(0.9 + Math.sin(elapsed * 8) * 0.1 * intensity);
+    lanceRing.rotation.z = elapsed * 1.4;
+    shield.rotation.z = Math.sin(elapsed * 1.3) * 0.035;
+  });
+}
+
+export function createEclipseChoristerEnemy(materials: MaterialLibrary): AuthoredModel {
+  const builder = new ModelBuilder('enemy.eclipseChorister');
+  const body = builder.group('eclipseChoristerBody');
+  const voiceMaterial = builder.cloneMaterial(
+    materials.get<THREE.MeshStandardMaterial>('danger'),
+    'material.eclipseChoristerVoice',
+    (material) => {
+      material.color.set('#e96bba');
+      material.emissive.set('#6a0a4a');
+      material.emissiveIntensity = 1.5;
+    },
+  );
+  const robeProfile = [
+    new THREE.Vector2(0.7, 0),
+    new THREE.Vector2(0.62, 0.32),
+    new THREE.Vector2(0.36, 1.45),
+    new THREE.Vector2(0.28, 1.72),
+  ];
+  const choirRobe = builder.mesh('bellChoirRobe', new THREE.LatheGeometry(robeProfile, 12), materials.get('void'), body);
+  choirRobe.position.y = 0.08;
+  const mask = builder.mesh('voicelessChoirMask', new THREE.IcosahedronGeometry(0.27, 1), materials.get('lunarSilver'), body);
+  mask.position.set(0, 1.83, -0.2);
+  mask.scale.set(0.75, 1.18, 0.45);
+  const throat = builder.mesh('telegraphVoiceCore', new THREE.OctahedronGeometry(0.13, 0), voiceMaterial, body, false);
+  throat.position.set(0, 1.46, -0.4);
+  const halo = builder.mesh(
+    'splitEclipseHalo',
+    new THREE.TorusGeometry(0.48, 0.055, 7, 26, Math.PI * 1.62),
+    materials.get('celestialGold'),
+    body,
+    false,
+  );
+  halo.position.y = 2.06;
+  halo.rotation.z = Math.PI * 0.18;
+
+  const choirWings: THREE.Group[] = [];
+  for (const side of [-1, 1]) {
+    const wing = builder.group(`${side < 0 ? 'left' : 'right'}ChoirWingJoint`, body);
+    wing.position.set(side * 0.42, 1.22, 0.08);
+    for (let tier = 0; tier < 3; tier += 1) {
+      const vane = builder.mesh(
+        `${side < 0 ? 'left' : 'right'}ChoirVane.${tier}`,
+        new THREE.ConeGeometry(0.13, 0.72 - tier * 0.1, 4),
+        tier === 1 ? materials.get('lunarSilver') : materials.get('blackSlate'),
+        wing,
+      );
+      vane.position.set(side * (0.2 + tier * 0.19), 0.04 - tier * 0.2, 0.1 + tier * 0.08);
+      vane.rotation.z = side * (-0.72 - tier * 0.12);
+    }
+    choirWings.push(wing);
+  }
+
+  const notes: THREE.Mesh[] = [];
+  for (let index = 0; index < 3; index += 1) {
+    const note = builder.mesh(`orbitingChoirNote.${index}`, new THREE.TetrahedronGeometry(0.085, 0), voiceMaterial, body, false);
+    notes.push(note);
+  }
+  addContactShadow(builder, materials, 0.72, 0.58);
+  const hitSocket = addSocket(builder, 'hitSocket', choirRobe, new THREE.Vector3(0, 0.9, 0));
+  const castSocket = addSocket(builder, 'castSocket', throat, new THREE.Vector3(0, 0, -0.12));
+  const collision = builder.collision('collisionProxy', new THREE.CapsuleGeometry(0.5, 1.08, 4, 8));
+  collision.position.y = 1.02;
+
+  return builder.finish(collision, { hit: hitSocket, cast: castSocket }, (_delta, elapsed, intensity) => {
+    body.position.y = 0.12 + Math.sin(elapsed * 2) * 0.1;
+    halo.rotation.y = Math.sin(elapsed * 0.8) * 0.24;
+    throat.scale.setScalar(0.82 + Math.sin(elapsed * 7.8) * 0.12 + intensity * 0.08);
+    choirWings.forEach((wing, index) => {
+      wing.rotation.y = (index === 0 ? -1 : 1) * (0.08 + Math.sin(elapsed * 1.7) * 0.05 * intensity);
+    });
+    notes.forEach((note, index) => {
+      const angle = elapsed * 0.75 + index * Math.PI * 2 / 3;
+      note.position.set(Math.cos(angle) * 0.86, 1.18 + Math.sin(angle * 1.6) * 0.36, Math.sin(angle) * 0.62);
+      note.rotation.y = elapsed * 1.8 + index;
+    });
+  });
+}
+
+export function createOrreryCastellanEnemy(materials: MaterialLibrary): AuthoredModel {
+  const builder = new ModelBuilder('enemy.orreryCastellan');
+  const body = builder.group('orreryCastellanBody');
+  const equationMaterial = builder.cloneMaterial(
+    materials.get<THREE.MeshStandardMaterial>('danger'),
+    'material.orreryCastellanEquation',
+    (material) => {
+      material.color.set('#ff3d62');
+      material.emissive.set('#790519');
+      material.emissiveIntensity = 1.65;
+    },
+  );
+  const bastion = builder.mesh('castellanBastionCore', new THREE.DodecahedronGeometry(0.78, 0), materials.get('obsidian'), body);
+  bastion.position.y = 1.1;
+  bastion.scale.set(1.18, 0.92, 1.02);
+  const equationCore = builder.mesh('redEquationCore', new THREE.IcosahedronGeometry(0.25, 1), equationMaterial, body, false);
+  equationCore.position.set(0, 1.12, -0.76);
+
+  const orrery = builder.group('castellanOrrery', body);
+  orrery.position.y = 1.1;
+  const rings: THREE.Mesh[] = [];
+  [1.02, 1.24, 1.46].forEach((radius, index) => {
+    const ring = builder.mesh(
+      `castellanOrbit.${index}`,
+      new THREE.TorusGeometry(radius, 0.045, 7, 28),
+      index === 1 ? materials.get('celestialGold') : materials.get('lunarSilver'),
+      orrery,
+      false,
+    );
+    ring.rotation.set(index * 0.7, index * 0.48, index * 0.36);
+    ring.userData.baseRotation = ring.rotation.clone();
+    rings.push(ring);
+  });
+
+  const legJoints: THREE.Group[] = [];
+  for (let index = 0; index < 4; index += 1) {
+    const angle = index * Math.PI / 2 + Math.PI / 4;
+    const leg = builder.group(`castellanLegJoint.${index}`, body);
+    leg.position.set(Math.sin(angle) * 0.58, 0.82, Math.cos(angle) * 0.58);
+    const foot = new THREE.Vector3(Math.sin(angle) * 0.78, -0.7, Math.cos(angle) * 0.78);
+    addBeam(builder, leg, `castellanStrut.${index}`, new THREE.Vector3(), foot, 0.11, materials.get('slateEdge'), 7);
+    const anchor = builder.mesh(`castellanAnchor.${index}`, new THREE.CylinderGeometry(0.24, 0.32, 0.22, 6), materials.get('blackSlate'), leg);
+    anchor.position.copy(foot).add(new THREE.Vector3(0, -0.08, 0));
+    legJoints.push(leg);
+  }
+  for (let index = 0; index < 5; index += 1) {
+    const angle = THREE.MathUtils.lerp(-1.1, 1.1, index / 4);
+    const spike = builder.mesh(`castellanCrownSpike.${index}`, new THREE.ConeGeometry(0.1, 0.58, 5), materials.get('lunarSilver'), body);
+    spike.position.set(Math.sin(angle) * 0.62, 1.88 + Math.cos(angle) * 0.24, 0.08);
+    spike.rotation.z = -angle;
+  }
+
+  addContactShadow(builder, materials, 1.28, 1.08);
+  const hitSocket = addSocket(builder, 'hitSocket', bastion, new THREE.Vector3(0, 0, -0.68));
+  const castSocket = addSocket(builder, 'castSocket', equationCore, new THREE.Vector3(0, 0, -0.24));
+  const collision = builder.collision('collisionProxy', new THREE.SphereGeometry(0.96, 10, 7));
+  collision.position.y = 1.02;
+
+  return builder.finish(collision, { hit: hitSocket, cast: castSocket }, (_delta, elapsed, intensity) => {
+    body.position.y = 0.04 + Math.sin(elapsed * 1.8) * 0.035;
+    equationCore.rotation.y = elapsed * 2.2;
+    equationCore.scale.setScalar(0.88 + Math.sin(elapsed * 6.4) * 0.1 * intensity);
+    rings.forEach((ring, index) => {
+      const base = ring.userData.baseRotation as THREE.Euler;
+      ring.rotation.set(
+        base.x + Math.sin(elapsed * (0.35 + index * 0.06)) * 0.12,
+        base.y + elapsed * (index % 2 === 0 ? 0.18 : -0.14),
+        base.z,
+      );
+    });
+    legJoints.forEach((leg, index) => {
+      leg.rotation.z = Math.sin(elapsed * 2.2 + index * Math.PI * 0.5) * 0.035;
+    });
+  });
+}
+
 export function createEnemyModel(variant: EnemyVariant, materials: MaterialLibrary): AuthoredModel {
   switch (variant) {
+    case 'wisp':
     case 'veilWraith': return createVeilWraithEnemy(materials);
+    case 'sentinel':
     case 'astralSentinel': return createAstralSentinelEnemy(materials);
+    case 'seer':
+    case 'eclipseChorister': return createEclipseChoristerEnemy(materials);
     case 'rimeStalker': return createRimeStalkerEnemy(materials);
+    case 'ashenInitiate': return createAshenInitiateEnemy(materials);
+    case 'astralLancer': return createAstralLancerEnemy(materials);
+    case 'orreryCastellan': return createOrreryCastellanEnemy(materials);
   }
 }
 
@@ -566,5 +1094,118 @@ export function createMoonwellRelic(materials: MaterialLibrary): AuthoredModel {
       mote.position.set(Math.cos(angle) * (0.38 + index * 0.05), Math.sin(angle * 1.6) * 0.22, Math.sin(angle) * (0.38 + index * 0.05));
       mote.scale.setScalar(0.7 + intensity * 0.3);
     });
+  });
+}
+
+export function createConstellationReliquary(materials: MaterialLibrary): AuthoredModel {
+  const builder = new ModelBuilder('relic.constellationReliquary');
+  const root = builder.group('constellationReliquaryBody');
+  const starMaterial = builder.cloneMaterial(
+    materials.get<THREE.MeshStandardMaterial>('spirit'),
+    'material.constellationReliquaryStar',
+    (material) => {
+      material.color.set('#ffd0b4');
+      material.emissive.set('#a33d55');
+      material.emissiveIntensity = 1.25;
+    },
+  );
+  const base = builder.mesh(
+    'twelveSidedReliquaryPlinth',
+    new THREE.CylinderGeometry(0.88, 1.14, 0.48, 12),
+    materials.get('blackSlate'),
+    root,
+  );
+  base.position.y = 0.24;
+  const plinthBand = builder.mesh(
+    'goldenEphemerisBand',
+    new THREE.TorusGeometry(0.9, 0.065, 7, 36),
+    materials.get('celestialGold'),
+    root,
+  );
+  plinthBand.position.y = 0.47;
+  plinthBand.rotation.x = Math.PI / 2;
+
+  const cage = builder.group('astrologyCage', root);
+  cage.position.y = 0.44;
+  for (let index = 0; index < 3; index += 1) {
+    const angle = index * Math.PI * 2 / 3;
+    const foot = new THREE.Vector3(Math.sin(angle) * 0.7, 0, Math.cos(angle) * 0.7);
+    const crown = new THREE.Vector3(Math.sin(angle) * 0.18, 1.72, Math.cos(angle) * 0.18);
+    addBeam(builder, cage, `reliquaryArch.${index}`, foot, crown, 0.055, materials.get('lunarSilver'), 7);
+  }
+
+  const constellationCore = builder.mesh(
+    'suspendedConstellationCore',
+    new THREE.DodecahedronGeometry(0.29, 1),
+    starMaterial,
+    cage,
+    false,
+  );
+  constellationCore.position.y = 1.04;
+  const orbitRoot = builder.group('constellationOrbitRoot', cage);
+  orbitRoot.position.y = 1.04;
+  const orbitalRings: THREE.Mesh[] = [];
+  [0.52, 0.7].forEach((radius, index) => {
+    const ring = builder.mesh(
+      `constellationOrbit.${index}`,
+      new THREE.TorusGeometry(radius, 0.035, 7, 28),
+      index === 0 ? materials.get('celestialGold') : materials.get('lunarSilver'),
+      orbitRoot,
+      false,
+    );
+    ring.rotation.set(index * 0.82 + 0.38, index * 0.64, index * 0.28);
+    orbitalRings.push(ring);
+  });
+  const orbitalRingBaseRotations = orbitalRings.map((ring) => ring.rotation.clone());
+  const constellationNodes: THREE.Mesh[] = [];
+  for (let index = 0; index < 6; index += 1) {
+    const node = builder.mesh(
+      `constellationNode.${index}`,
+      new THREE.OctahedronGeometry(index % 3 === 0 ? 0.09 : 0.06, 0),
+      index % 2 === 0 ? starMaterial : materials.get('moonstone'),
+      orbitRoot,
+      false,
+    );
+    constellationNodes.push(node);
+  }
+  const runeDisc = builder.mesh(
+    'constellationRuneDisc',
+    new THREE.CircleGeometry(0.67, 32),
+    materials.get('runeLight'),
+    root,
+    false,
+  );
+  runeDisc.rotation.x = -Math.PI / 2;
+  runeDisc.position.y = 0.495;
+
+  addContactShadow(builder, materials, 1.08, 1.02);
+  const interactSocket = addSocket(builder, 'interactSocket', constellationCore, new THREE.Vector3());
+  const restorationSocket = addSocket(builder, 'restorationSocket', orbitRoot, new THREE.Vector3());
+  const collision = builder.collision('collisionProxy', new THREE.CylinderGeometry(0.96, 0.96, 1.86, 12));
+  collision.position.y = 0.93;
+
+  return builder.finish(collision, { interact: interactSocket, restoration: restorationSocket }, (_delta, elapsed, intensity) => {
+    constellationCore.rotation.set(elapsed * 0.38, elapsed * 0.72, elapsed * 0.24);
+    constellationCore.scale.setScalar(0.9 + Math.sin(elapsed * 3.4) * 0.06 + intensity * 0.035);
+    orbitRoot.rotation.y = elapsed * 0.24 * intensity;
+    orbitalRings.forEach((ring, index) => {
+      const base = orbitalRingBaseRotations[index];
+      ring.rotation.set(
+        base.x,
+        base.y + Math.sin(elapsed * (0.42 + index * 0.08)) * 0.16,
+        base.z + elapsed * (index % 2 === 0 ? 0.22 : -0.19) * intensity,
+      );
+    });
+    constellationNodes.forEach((node, index) => {
+      const angle = index * Math.PI / 3 + elapsed * (0.28 + (index % 2) * 0.08);
+      const radius = index % 2 === 0 ? 0.48 : 0.66;
+      node.position.set(
+        Math.cos(angle) * radius,
+        Math.sin(angle * 1.7) * 0.2,
+        Math.sin(angle) * radius,
+      );
+      node.scale.setScalar(0.82 + Math.sin(elapsed * 4.2 + index) * 0.12);
+    });
+    runeDisc.rotation.z = -elapsed * 0.11;
   });
 }

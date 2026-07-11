@@ -13,17 +13,194 @@
       <canvas id="game-canvas" aria-label="The Last Firmament playable game world"></canvas>
       <div class="world-vignette" aria-hidden="true"></div>
 
-      <section id="title-veil" class="title-veil" aria-label="The Last Firmament">
-        <div class="title-veil__sigil" aria-hidden="true">
-          <span></span><span></span><i></i>
+      <!-- Compatibility hook for the existing HUD and smoke tests. The visible,
+           deliberate opening flow now lives in #front-end-layer. -->
+      <section id="title-veil" class="title-veil" aria-hidden="true" hidden>
+        <button id="enter-game" type="button" data-ui-action="enter">Enter game</button>
+      </section>
+
+      <section id="front-end-layer" class="front-end-layer" aria-label="The Last Firmament front end" hidden>
+        <div class="front-end-backdrop" aria-hidden="true">
+          <i></i><i></i><span></span>
         </div>
-        <p class="eyebrow">A celestial pilgrimage</p>
-        <h1>The Last <span>Firmament</span></h1>
-        <p class="title-veil__lore">The heavens remember those who seek them.</p>
-        <button id="enter-game" class="rune-button rune-button--primary" type="button" data-ui-action="enter" data-ui-sound="confirm">
-          <span>Cross the threshold</span>
-          <small>Press any key</small>
-        </button>
+
+        <article
+          id="main-menu-panel"
+          class="front-panel front-panel--main"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="front-title"
+          aria-describedby="front-lore"
+          hidden
+        >
+          <header class="front-title">
+            <div class="front-title__astrolabe" aria-hidden="true"><i></i><span>✦</span></div>
+            <div>
+              <p class="eyebrow">A celestial pilgrimage</p>
+              <h1 id="front-title">The Last <em>Firmament</em></h1>
+              <p id="front-lore">The heavens remember those who seek them.</p>
+            </div>
+          </header>
+
+          <div class="front-profile" aria-label="Current pilgrim">
+            <span class="front-profile__seal" aria-hidden="true">☾</span>
+            <span>
+              <small>School ledger</small>
+              <strong id="front-profile-name">Unnamed Pilgrim</strong>
+              <em id="front-profile-detail">Young initiate · Deep hood · Crescent staff</em>
+            </span>
+          </div>
+
+          <nav class="front-actions" aria-label="Main menu">
+            <button id="begin-pilgrimage" class="front-action front-action--primary" type="button" data-ui-sound="confirm">
+              <span>Begin pilgrimage</span><small>Cross into the moonless tundra</small>
+            </button>
+            <button id="shape-pilgrim" class="front-action" type="button" data-ui-sound="confirm">
+              <span>Shape the pilgrim</span><small>Name and attire your sorcerer</small>
+            </button>
+            <button id="front-settings-button" class="front-action" type="button" data-ui-sound="confirm">
+              <span>Settings</span><small>Sound and reduced motion</small>
+            </button>
+            <button
+              id="front-controls-button"
+              class="front-action"
+              type="button"
+              aria-controls="front-controls-panel"
+              aria-expanded="false"
+              data-ui-sound="confirm"
+            >
+              <span>Controls</span><small>Review the pilgrim's disciplines</small>
+            </button>
+          </nav>
+
+          <aside id="front-controls-panel" class="front-controls" aria-labelledby="front-controls-title" hidden>
+            <div class="front-controls__heading">
+              <div>
+                <p class="eyebrow">Pilgrim's disciplines</p>
+                <h2 id="front-controls-title">Controls</h2>
+              </div>
+              <button id="front-controls-close" class="icon-button" type="button" aria-label="Close controls" data-ui-sound="cancel">×</button>
+            </div>
+            <dl>
+              <div><dt>Move</dt><dd><kbd>WASD</kbd> / arrows</dd></div>
+              <div><dt>Dodge</dt><dd><kbd>Space</kbd> / Shift</dd></div>
+              <div><dt>Melee</dt><dd><kbd>J</kbd> / left click</dd></div>
+              <div><dt>Lunar sorcery</dt><dd><kbd>Q</kbd> / right click</dd></div>
+              <div><dt>Aurora light</dt><dd><kbd>E</kbd> / middle click</dd></div>
+              <div><dt>Lock target</dt><dd><kbd>Tab</kbd></dd></div>
+              <div><dt>Interact</dt><dd><kbd>F</kbd></dd></div>
+              <div><dt>Pause</dt><dd><kbd>Esc</kbd> / P</dd></div>
+            </dl>
+            <p>On touch screens, the same intentions are mapped to the astral stick and action seals.</p>
+          </aside>
+        </article>
+
+        <article
+          id="character-creator-panel"
+          class="front-panel front-panel--creator"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="creator-title"
+          aria-describedby="creator-intro"
+          hidden
+        >
+          <section class="creator-preview" aria-label="Live character preview">
+            <canvas id="character-preview-canvas" class="character-preview-canvas" aria-hidden="true"></canvas>
+            <div class="creator-preview__orbit" aria-hidden="true"><i></i><i></i><span>☾</span></div>
+            <div class="creator-preview__caption">
+              <p class="eyebrow">Astrology mirror</p>
+              <strong>Your likeness beneath the absent stars</strong>
+              <span>Every choice is reflected in the world as you make it.</span>
+            </div>
+          </section>
+
+          <form id="character-form" class="creator-form" novalidate>
+            <header class="creator-heading">
+              <div>
+                <p class="eyebrow">School of the spiral spire</p>
+                <h2 id="creator-title">Shape the pilgrim</h2>
+                <p id="creator-intro">Choose the mortal form that will carry the school's final light.</p>
+              </div>
+              <button id="creator-back" class="creator-back" type="button" data-ui-sound="cancel">Back</button>
+            </header>
+
+            <label class="character-name" for="character-name">
+              <span>Name in the school ledger</span>
+              <input
+                id="character-name"
+                name="name"
+                type="text"
+                value="Unnamed Pilgrim"
+                maxlength="24"
+                autocomplete="nickname"
+                spellcheck="false"
+                required
+              />
+              <small>1–24 characters. This choice can be changed later.</small>
+            </label>
+
+            <div class="creator-fields">
+              <fieldset>
+                <legend>Life stage</legend>
+                <div class="creator-options creator-options--two">
+                  <label class="creator-option"><input type="radio" name="lifeStage" value="young" checked /><span><strong>Young initiate</strong><small>Newly called to the spire</small></span></label>
+                  <label class="creator-option"><input type="radio" name="lifeStage" value="elder" /><span><strong>Elder seer</strong><small>Weathered by a dimming age</small></span></label>
+                </div>
+              </fieldset>
+
+              <fieldset>
+                <legend>Frame</legend>
+                <div class="creator-options creator-options--two">
+                  <label class="creator-option"><input type="radio" name="frame" value="slender" checked /><span><strong>Slender</strong><small>Long, spare silhouette</small></span></label>
+                  <label class="creator-option"><input type="radio" name="frame" value="sturdy" /><span><strong>Sturdy</strong><small>Broad, grounded silhouette</small></span></label>
+                </div>
+              </fieldset>
+
+              <fieldset>
+                <legend>Veil</legend>
+                <div class="creator-options creator-options--three">
+                  <label class="creator-option creator-option--compact"><input type="radio" name="veil" value="deep-hood" checked /><span><strong>Deep hood</strong></span></label>
+                  <label class="creator-option creator-option--compact"><input type="radio" name="veil" value="moon-mask" /><span><strong>Moon mask</strong></span></label>
+                  <label class="creator-option creator-option--compact"><input type="radio" name="veil" value="unveiled" /><span><strong>Unveiled</strong></span></label>
+                </div>
+              </fieldset>
+
+              <fieldset>
+                <legend>Robe dye</legend>
+                <div class="creator-options creator-options--four">
+                  <label class="creator-option creator-option--swatch" style="--swatch: #8497ca"><input type="radio" name="robeDye" value="midnight" checked /><span><i aria-hidden="true"></i><strong>Midnight</strong></span></label>
+                  <label class="creator-option creator-option--swatch" style="--swatch: #c4c4c1"><input type="radio" name="robeDye" value="ash" /><span><i aria-hidden="true"></i><strong>Ash</strong></span></label>
+                  <label class="creator-option creator-option--swatch" style="--swatch: #88a790"><input type="radio" name="robeDye" value="moss" /><span><i aria-hidden="true"></i><strong>Moss</strong></span></label>
+                  <label class="creator-option creator-option--swatch" style="--swatch: #b77c83"><input type="radio" name="robeDye" value="oxblood" /><span><i aria-hidden="true"></i><strong>Oxblood</strong></span></label>
+                </div>
+              </fieldset>
+
+              <fieldset>
+                <legend>Astral metal</legend>
+                <div class="creator-options creator-options--three">
+                  <label class="creator-option creator-option--swatch" style="--swatch: #b8cef2"><input type="radio" name="astralMetal" value="lunar-silver" checked /><span><i aria-hidden="true"></i><strong>Lunar silver</strong></span></label>
+                  <label class="creator-option creator-option--swatch" style="--swatch: #70d5ad"><input type="radio" name="astralMetal" value="aurora-bronze" /><span><i aria-hidden="true"></i><strong>Aurora bronze</strong></span></label>
+                  <label class="creator-option creator-option--swatch" style="--swatch: #d6bd79"><input type="radio" name="astralMetal" value="celestial-gold" /><span><i aria-hidden="true"></i><strong>Celestial gold</strong></span></label>
+                </div>
+              </fieldset>
+
+              <fieldset>
+                <legend>Catalyst</legend>
+                <div class="creator-options creator-options--three">
+                  <label class="creator-option"><input type="radio" name="catalyst" value="crescent-staff" checked /><span><strong>Crescent staff</strong><small>Traditional lunar focus</small></span></label>
+                  <label class="creator-option"><input type="radio" name="catalyst" value="ash-wand" /><span><strong>Ash wand</strong><small>Swift aurora focus</small></span></label>
+                  <label class="creator-option"><input type="radio" name="catalyst" value="bare-hands" /><span><strong>Bare hands</strong><small>Unmediated sorcery</small></span></label>
+                </div>
+              </fieldset>
+            </div>
+
+            <p id="creator-status" class="creator-status" role="status">Changes are previewed live and saved only when you choose.</p>
+            <footer class="creator-actions">
+              <button id="creator-save" class="rune-button" type="button" data-ui-sound="confirm">Save pilgrim</button>
+              <button id="creator-begin" class="rune-button rune-button--primary" type="submit" data-ui-sound="confirm">Begin pilgrimage</button>
+            </footer>
+          </form>
+        </article>
       </section>
 
       <section id="hud" aria-live="polite" aria-label="Game status">
@@ -196,6 +373,7 @@
         </div>
       </nav>
     </main>
+    <script type="module" src="/src/ui/FrontEndController.ts"></script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

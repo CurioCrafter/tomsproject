@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { MaterialLibrary } from '../assets/MaterialLibrary';
+import { FIRMAMENT_ROUTE } from '../game/content/FirmamentRoute';
+import type { GateStateSnapshot, RouteSectionDefinition, RouteShape } from '../game/content/RouteTypes';
 
 export type CelestialWorldOptions = {
   arenaHalfWidth?: number;
@@ -38,6 +40,7 @@ export class CelestialWorld {
   private readonly starfield: THREE.Points;
   private readonly observatoryMechanism = new THREE.Group();
   private readonly floatingMonoliths: THREE.Object3D[] = [];
+  private readonly gateVisuals = new Map<string, THREE.Group>();
   private readonly beaconLight = new THREE.PointLight('#7debd8', 0, 12, 2);
   private restoration = 0;
   private disposed = false;
@@ -121,8 +124,9 @@ export class CelestialWorld {
           vec4 texel = texture2D(auroraMap, uv);
           float edge = smoothstep(0.0, 0.18, vUv.y) * smoothstep(1.0, 0.72, vUv.y);
           float shimmer = 0.72 + sin(vUv.x * 18.0 + time * 0.8) * 0.16;
-          float alpha = texel.r * edge * shimmer * (0.12 + restoration * 0.62);
-          vec3 color = mix(vec3(0.15, 0.62, 0.68), vec3(0.48, 0.35, 0.95), texel.b);
+          float alpha = max(texel.r, 0.24) * edge * shimmer * (0.34 + restoration * 0.5);
+          float bloodBand = smoothstep(0.38, 0.72, sin((vUv.x + time * 0.004) * 14.0) * 0.5 + 0.5);
+          vec3 color = mix(vec3(0.08, 0.78, 0.46), vec3(0.72, 0.08, 0.18), bloodBand * 0.62 + texel.b * 0.18);
           gl_FragColor = vec4(color * (0.8 + restoration * 0.8), alpha);
         }
       `,
@@ -147,14 +151,15 @@ export class CelestialWorld {
     const arenaHalfDepth = options.arenaHalfDepth ?? 7;
     const worldRadius = options.worldRadius ?? 52;
     this.buildSky(worldRadius);
-    this.buildTundra(arenaHalfWidth, arenaHalfDepth);
+    this.buildLinearRoute();
     this.buildForeground(arenaHalfWidth, arenaHalfDepth);
     this.buildSpireFields(arenaHalfWidth, arenaHalfDepth);
     this.buildObservatory();
     this.buildFarSilhouettes(worldRadius);
 
     this.beaconLight.name = 'world.restorationBeaconLight';
-    this.beaconLight.position.set(0, 4.8, -15.5);
+    const finalSection = FIRMAMENT_ROUTE.sections[FIRMAMENT_ROUTE.sections.length - 1];
+    this.beaconLight.position.set(finalSection.walkable[0].center[0], 4.8, finalSection.walkable[0].center[1]);
     this.midgroundLayer.add(this.beaconLight);
   }
 
@@ -178,6 +183,24 @@ export class CelestialWorld {
       monolith.position.y = monolith.userData.baseY + Math.sin(phase) * (0.08 + this.restoration * 0.16);
       monolith.rotation.y += delta * (index % 2 === 0 ? 0.045 : -0.038) * (0.3 + this.restoration);
     });
+
+    this.gateVisuals.forEach((gate) => {
+      const portcullis = gate.getObjectByName('gatePortcullis');
+      const seal = gate.getObjectByName('gateSeal');
+      const open = Boolean(gate.userData.open);
+      if (portcullis) portcullis.position.y = THREE.MathUtils.damp(portcullis.position.y, open ? 5.35 : 0.08, 7, delta);
+      if (seal instanceof THREE.Mesh && seal.material instanceof THREE.MeshBasicMaterial) {
+        seal.material.opacity = THREE.MathUtils.damp(seal.material.opacity, open ? 0 : 0.42, 8, delta);
+        seal.visible = seal.material.opacity > 0.015;
+      }
+    });
+  }
+
+  setGateStates(states: readonly GateStateSnapshot[]): void {
+    for (const state of states) {
+      const gate = this.gateVisuals.get(state.id);
+      if (gate) gate.userData.open = state.state === 'open';
+    }
   }
 
   dispose(): void {
@@ -216,11 +239,11 @@ export class CelestialWorld {
     dome.frustumCulled = false;
     this.skyLayer.add(this.starfield);
 
-    const curtainGeometry = this.track(new THREE.PlaneGeometry(31, 13, 30, 10));
+    const curtainGeometry = this.track(new THREE.PlaneGeometry(52, 18, 42, 12));
     for (let i = 0; i < 3; i += 1) {
       const curtain = new THREE.Mesh(curtainGeometry, this.auroraMaterial);
       curtain.name = `auroraCurtain.${i}`;
-      curtain.position.set((i - 1) * 18, 17 + i * 2.4, -33 + Math.abs(i - 1) * 3);
+      curtain.position.set((i - 1) * 27, 20 + i * 2.4, -48 + Math.abs(i - 1) * 5);
       curtain.rotation.y = (i - 1) * -0.36;
       curtain.rotation.z = (i - 1) * 0.09;
       curtain.frustumCulled = false;
@@ -253,57 +276,249 @@ export class CelestialWorld {
     return points;
   }
 
-  private buildTundra(halfWidth: number, halfDepth: number): void {
-    const floor = this.mesh(
-      'blackSlateTundra',
-      new THREE.PlaneGeometry(halfWidth * 2 + 8, halfDepth * 2 + 8, 1, 1),
+  private buildLinearRoute(): void {
+    const chasmMaterial = new THREE.MeshStandardMaterial({
+      name: 'world.lightlessChasm',
+      color: '#010307',
+      roughness: 1,
+      metalness: 0,
+    });
+    this.ownedMaterials.add(chasmMaterial);
+    const chasm = this.mesh('lightlessChasm', new THREE.PlaneGeometry(92, 142), chasmMaterial, this.playLayer, false);
+    chasm.rotation.x = -Math.PI / 2;
+    chasm.position.set(0, -1.85, -10.5);
+
+    for (const section of FIRMAMENT_ROUTE.sections) {
+      section.walkable.forEach((shape, shapeIndex) => this.buildRouteSectionShape(section, shape, shapeIndex));
+      if (section.kind === 'bridge' || section.kind === 'causeway' || section.kind === 'processional') {
+        section.walkable.forEach((shape) => {
+          if (shape.kind === 'obb') this.buildBridgeDetails(section, shape);
+        });
+      } else {
+        this.buildCourtDetails(section);
+      }
+    }
+
+    for (const gate of FIRMAMENT_ROUTE.gates) this.buildRouteGate(gate.id, gate.collider.a, gate.collider.b, gate.initialState === 'open');
+    this.buildSchoolSpire();
+  }
+
+  private buildRouteSectionShape(section: RouteSectionDefinition, shape: RouteShape, shapeIndex: number): void {
+    if (shape.kind === 'circle') {
+      const foundation = this.mesh(
+        `${section.id}.foundation.${shapeIndex}`,
+        new THREE.CylinderGeometry(shape.radius, shape.radius + 0.48, 0.56, Math.max(18, Math.round(shape.radius * 4))),
+        this.materials.get('blackSlate'),
+        this.playLayer,
+      );
+      foundation.position.set(shape.center[0], -0.3, shape.center[1]);
+      const frostLip = this.mesh(
+        `${section.id}.frostLip.${shapeIndex}`,
+        new THREE.TorusGeometry(shape.radius * 0.94, 0.095, 6, 48),
+        this.materials.get('snowCrust'),
+        this.playLayer,
+        false,
+      );
+      frostLip.position.set(shape.center[0], 0.015, shape.center[1]);
+      frostLip.rotation.x = Math.PI / 2;
+      return;
+    }
+
+    const width = shape.halfExtents[0] * 2;
+    const depth = shape.halfExtents[1] * 2;
+    const foundation = this.mesh(
+      `${section.id}.foundation.${shapeIndex}`,
+      new THREE.BoxGeometry(width, 0.5, depth),
       this.materials.get('blackSlate'),
       this.playLayer,
     );
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.y = -0.08;
+    foundation.position.set(shape.center[0], -0.27, shape.center[1]);
+    foundation.rotation.y = -shape.rotation;
+    const inlay = this.mesh(
+      `${section.id}.routeInlay.${shapeIndex}`,
+      new THREE.BoxGeometry(Math.max(0.42, width * 0.12), 0.035, depth * 0.94),
+      this.materials.get('slateEdge'),
+      this.playLayer,
+      false,
+    );
+    inlay.position.set(shape.center[0], 0.012, shape.center[1]);
+    inlay.rotation.y = -shape.rotation;
+  }
 
-    const pathMaterial = this.materials.get('slateEdge');
-    const pathGeometry = this.track(new THREE.BoxGeometry(1.2, 0.055, 0.38));
-    const markers: Array<[number, number, number]> = [];
-    for (let x = -halfWidth + 1; x <= halfWidth - 1; x += 1.75) {
-      markers.push([x, 0, -halfDepth + 0.7], [x, Math.PI, halfDepth - 0.7]);
-    }
-    for (let z = -halfDepth + 1.7; z <= halfDepth - 1.7; z += 1.75) {
-      markers.push([-halfWidth + 0.7, Math.PI / 2, z], [halfWidth - 0.7, -Math.PI / 2, z]);
-    }
-    const inlays = new THREE.InstancedMesh(pathGeometry, pathMaterial, markers.length);
-    inlays.name = 'navigationalSlateInlays';
+  private buildBridgeDetails(section: RouteSectionDefinition, shape: Extract<RouteShape, { kind: 'obb' }>): void {
+    const group = new THREE.Group();
+    group.name = `${section.id}.bridgeKit`;
+    group.position.set(shape.center[0], 0, shape.center[1]);
+    group.rotation.y = -shape.rotation;
+    this.foregroundLayer.add(group);
+
+    const halfWidth = shape.halfExtents[0];
+    const halfDepth = shape.halfExtents[1];
+    const railGeometry = this.track(new THREE.BoxGeometry(0.18, 0.28, 1.45));
+    const postGeometry = this.track(new THREE.CylinderGeometry(0.1, 0.14, 0.92, 6));
+    const railTransforms: THREE.Matrix4[] = [];
+    const postTransforms: THREE.Matrix4[] = [];
     const matrix = new THREE.Matrix4();
-    markers.forEach(([x, rotation, z], index) => {
-      matrix.makeRotationY(rotation);
-      matrix.setPosition(x, -0.035, z);
-      inlays.setMatrixAt(index, matrix);
-    });
-    inlays.receiveShadow = true;
-    inlays.instanceMatrix.needsUpdate = true;
-    this.playLayer.add(inlays);
-
-    const frostGeometry = this.track(new THREE.CircleGeometry(1, 18));
-    const frostPatches = new THREE.InstancedMesh(frostGeometry, this.materials.get('snowCrust'), 16);
-    frostPatches.name = 'windScouredFrostShelves';
-    const safeRadiusX = halfWidth + 1.4;
-    const safeRadiusZ = halfDepth + 1.5;
-    for (let i = 0; i < 16; i += 1) {
-      const side = i % 4;
-      const along = ((Math.floor(i / 4) + 0.5) / 4 - 0.5) * 34;
-      const x = side < 2 ? along : (side === 2 ? -safeRadiusX - 3.5 : safeRadiusX + 3.5);
-      const z = side < 2 ? (side === 0 ? -safeRadiusZ - 3 : safeRadiusZ + 3) : along * 0.62;
-      matrix.compose(
-        new THREE.Vector3(x, -0.045, z),
-        new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, i * 0.37)),
-        new THREE.Vector3(1.4 + (i % 3) * 0.55, 0.7 + (i % 4) * 0.16, 1),
-      );
-      frostPatches.setMatrixAt(i, matrix);
+    const quaternion = new THREE.Quaternion();
+    const count = Math.max(3, Math.floor((halfDepth * 2) / 1.55));
+    for (let index = 0; index <= count; index += 1) {
+      const z = THREE.MathUtils.lerp(-halfDepth + 0.62, halfDepth - 0.62, index / count);
+      for (const side of [-1, 1]) {
+        matrix.compose(new THREE.Vector3(side * (halfWidth - 0.18), 0.43, z), quaternion, new THREE.Vector3(1, 1, 1));
+        postTransforms.push(matrix.clone());
+        if (index < count && (index + section.order + (side < 0 ? 1 : 0)) % 5 !== 0) {
+          const nextZ = THREE.MathUtils.lerp(-halfDepth + 0.62, halfDepth - 0.62, (index + 0.5) / count);
+          matrix.compose(new THREE.Vector3(side * (halfWidth - 0.18), 0.66, nextZ), quaternion, new THREE.Vector3(1, 1, 1));
+          railTransforms.push(matrix.clone());
+        }
+      }
     }
-    frostPatches.receiveShadow = true;
-    frostPatches.instanceMatrix.needsUpdate = true;
-    this.playLayer.add(frostPatches);
+    const posts = new THREE.InstancedMesh(postGeometry, this.materials.get('obsidian'), postTransforms.length);
+    posts.name = `${section.id}.parapetPosts`;
+    postTransforms.forEach((transform, index) => posts.setMatrixAt(index, transform));
+    posts.instanceMatrix.needsUpdate = true;
+    posts.castShadow = true;
+    group.add(posts);
+    const rails = new THREE.InstancedMesh(railGeometry, this.materials.get('lunarSilver'), railTransforms.length);
+    rails.name = `${section.id}.brokenParapets`;
+    railTransforms.forEach((transform, index) => rails.setMatrixAt(index, transform));
+    rails.instanceMatrix.needsUpdate = true;
+    group.add(rails);
+
+    for (const end of [-1, 1]) {
+      const lamp = new THREE.Group();
+      lamp.name = `${section.id}.runeLamp.${end < 0 ? 'near' : 'far'}`;
+      lamp.position.set(0, 0, end * (halfDepth - 0.55));
+      const base = this.mesh('lampBase', new THREE.CylinderGeometry(0.32, 0.44, 0.44, 8), this.materials.get('blackSlate'), lamp);
+      base.position.y = 0.2;
+      const core = this.mesh('lampCore', new THREE.OctahedronGeometry(0.18, 0), this.materials.get('moonstone'), lamp, false);
+      core.position.y = 0.72;
+      group.add(lamp);
+    }
+  }
+
+  private buildCourtDetails(section: RouteSectionDefinition): void {
+    const circle = section.walkable.find((shape): shape is Extract<RouteShape, { kind: 'circle' }> => shape.kind === 'circle');
+    if (!circle) return;
+    const columnGeometry = this.track(new THREE.CylinderGeometry(0.22, 0.34, 1.9, 7));
+    const columns = new THREE.InstancedMesh(columnGeometry, this.materials.get('blackSlate'), 8);
+    columns.name = `${section.id}.weatheredColumns`;
+    const matrix = new THREE.Matrix4();
+    for (let index = 0; index < 8; index += 1) {
+      const angle = (index / 8) * Math.PI * 2;
+      const radius = circle.radius + 0.18;
+      matrix.compose(
+        new THREE.Vector3(circle.center[0] + Math.sin(angle) * radius, 0.88 - (index % 3) * 0.12, circle.center[1] + Math.cos(angle) * radius),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, angle + index * 0.19, (index % 2 === 0 ? 1 : -1) * 0.035)),
+        new THREE.Vector3(1, 0.72 + (index % 3) * 0.13, 1),
+      );
+      columns.setMatrixAt(index, matrix);
+    }
+    columns.instanceMatrix.needsUpdate = true;
+    columns.castShadow = true;
+    this.midgroundLayer.add(columns);
+  }
+
+  private buildRouteGate(id: string, a: readonly [number, number], b: readonly [number, number], open: boolean): void {
+    const dx = b[0] - a[0];
+    const dz = b[1] - a[1];
+    const length = Math.hypot(dx, dz);
+    const group = new THREE.Group();
+    group.name = `routeGate.${id}`;
+    group.position.set((a[0] + b[0]) * 0.5, 0, (a[1] + b[1]) * 0.5);
+    group.rotation.y = -Math.atan2(dz, dx);
+    group.userData.open = open;
+    this.foregroundLayer.add(group);
+
+    for (const side of [-1, 1]) {
+      const pier = this.mesh(
+        `gatePier.${side}`,
+        new THREE.BoxGeometry(0.62, 3.5, 0.78),
+        this.materials.get('blackSlate'),
+        group,
+      );
+      pier.position.set(side * length * 0.5, 1.72, 0);
+      const crown = this.mesh(
+        `gateCrown.${side}`,
+        new THREE.OctahedronGeometry(0.38, 0),
+        this.materials.get('moonstone'),
+        group,
+        false,
+      );
+      crown.position.set(side * length * 0.5, 3.72, 0);
+    }
+
+    const portcullis = new THREE.Group();
+    portcullis.name = 'gatePortcullis';
+    portcullis.position.y = open ? 5.35 : 0.08;
+    group.add(portcullis);
+
+    const innerWidth = Math.max(1, length - 0.7);
+    const barCount = Math.max(3, Math.floor(innerWidth / 0.56) + 1);
+    const barGeometry = this.track(new THREE.BoxGeometry(0.13, 2.65, 0.14));
+    const bars = new THREE.InstancedMesh(barGeometry, this.materials.get('obsidian'), barCount);
+    bars.name = 'gatePortcullisBars';
+    const matrix = new THREE.Matrix4();
+    for (let index = 0; index < barCount; index += 1) {
+      const x = THREE.MathUtils.lerp(-innerWidth * 0.5, innerWidth * 0.5, barCount === 1 ? 0.5 : index / (barCount - 1));
+      matrix.makeTranslation(x, 1.42, 0);
+      bars.setMatrixAt(index, matrix);
+    }
+    bars.instanceMatrix.needsUpdate = true;
+    bars.castShadow = true;
+    portcullis.add(bars);
+
+    const railGeometry = this.track(new THREE.BoxGeometry(innerWidth + 0.18, 0.13, 0.18));
+    for (const [index, y] of [0.52, 1.46, 2.38].entries()) {
+      const rail = new THREE.Mesh(railGeometry, this.materials.get('lunarSilver'));
+      rail.name = `gatePortcullisRail.${index}`;
+      rail.position.y = y;
+      rail.castShadow = true;
+      portcullis.add(rail);
+    }
+    const sealMaterial = new THREE.MeshBasicMaterial({
+      color: '#7debd8',
+      transparent: true,
+      opacity: open ? 0 : 0.42,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+    });
+    this.ownedMaterials.add(sealMaterial);
+    const seal = this.mesh('gateSeal', new THREE.PlaneGeometry(Math.max(1, length - 0.75), 2.7), sealMaterial, group, false);
+    seal.position.set(0, 1.55, -0.12);
+    seal.visible = !open;
+    this.gateVisuals.set(id, group);
+  }
+
+  private buildSchoolSpire(): void {
+    const spire = new THREE.Group();
+    spire.name = 'spiralAstrologySchool';
+    spire.position.set(9.5, 0, 49.5);
+    this.midgroundLayer.add(spire);
+    for (let tier = 0; tier < 5; tier += 1) {
+      const height = 3.2 + tier * 0.28;
+      const tower = this.mesh(
+        `schoolSpireTier.${tier}`,
+        new THREE.CylinderGeometry(2.45 - tier * 0.24, 2.8 - tier * 0.22, height, 9),
+        tier % 2 === 0 ? this.materials.get('blackSlate') : this.materials.get('obsidian'),
+        spire,
+      );
+      tower.position.y = 1.5 + tier * 2.7;
+      tower.rotation.y = tier * 0.31;
+      const balcony = this.mesh(
+        `schoolSpireBalcony.${tier}`,
+        new THREE.TorusGeometry(2.52 - tier * 0.22, 0.12, 7, 36),
+        this.materials.get('lunarSilver'),
+        spire,
+      );
+      balcony.position.y = 2.95 + tier * 2.7;
+      balcony.rotation.x = Math.PI / 2;
+    }
+    const crown = this.mesh('schoolSpireCrown', new THREE.ConeGeometry(1.65, 4.8, 7), this.materials.get('obsidian'), spire);
+    crown.position.y = 16.4;
+    const orrery = this.mesh('schoolSpireOrrery', new THREE.TorusKnotGeometry(1.15, 0.07, 80, 8, 2, 3), this.materials.get('celestialGold'), spire, false);
+    orrery.position.y = 17.9;
   }
 
   private buildForeground(halfWidth: number, halfDepth: number): void {
@@ -385,26 +600,36 @@ export class CelestialWorld {
   private buildObservatory(): void {
     const observatory = new THREE.Group();
     observatory.name = 'moonfallObservatory';
-    observatory.position.set(0, 0, -18.5);
+    const finalSection = FIRMAMENT_ROUTE.sections[FIRMAMENT_ROUTE.sections.length - 1];
+    observatory.position.set(finalSection.walkable[0].center[0], 0, finalSection.walkable[0].center[1]);
     this.midgroundLayer.add(observatory);
 
-    const foundation = this.mesh('observatoryFoundation', new THREE.CylinderGeometry(5.4, 6.1, 1.05, 16), this.materials.get('blackSlate'), observatory);
-    foundation.position.y = 0.45;
-    const terrace = this.mesh('observatoryTerrace', new THREE.CylinderGeometry(4.7, 5.15, 0.32, 16), this.materials.get('slateEdge'), observatory);
-    terrace.position.y = 1.08;
-    const dome = this.mesh(
-      'observatoryDome',
-      new THREE.SphereGeometry(3.25, 24, 12, 0, Math.PI * 2, 0, Math.PI * 0.52),
-      this.materials.get('obsidian'),
+    const terrace = this.mesh(
+      'observatoryTerraceRing',
+      new THREE.RingGeometry(5.8, 8.55, 40),
+      this.materials.get('blackSlate'),
       observatory,
     );
-    dome.position.y = 1.18;
-    const domeBand = this.mesh('observatoryDomeBand', new THREE.TorusGeometry(3.25, 0.16, 8, 40), this.materials.get('celestialGold'), observatory);
-    domeBand.rotation.x = Math.PI / 2;
-    domeBand.position.y = 1.24;
+    terrace.rotation.x = -Math.PI / 2;
+    terrace.position.y = 0.018;
+
+    // The observatory is an open ruin rather than a solid dome. The ribs retain
+    // the celestial silhouette while leaving the full boss floor readable and
+    // collision-honest.
+    for (let index = 0; index < 3; index += 1) {
+      const rib = this.mesh(
+        `observatoryDomeRib.${index}`,
+        new THREE.TorusGeometry(4.65, 0.085, 7, 44, Math.PI),
+        index === 1 ? this.materials.get('celestialGold') : this.materials.get('lunarSilver'),
+        observatory,
+        false,
+      );
+      rib.position.y = 0.16;
+      rib.rotation.y = index * Math.PI / 3;
+    }
 
     this.observatoryMechanism.name = 'observatoryCelestialMechanism';
-    this.observatoryMechanism.position.y = 3.9;
+    this.observatoryMechanism.position.y = 4.65;
     observatory.add(this.observatoryMechanism);
     const meridian = this.mesh('meridianRing', new THREE.TorusGeometry(2.45, 0.11, 8, 40), this.materials.get('lunarSilver'), this.observatoryMechanism);
     meridian.rotation.y = Math.PI / 2;
@@ -415,8 +640,8 @@ export class CelestialWorld {
 
     const telescopePivot = new THREE.Group();
     telescopePivot.name = 'grandTelescopePivot';
-    telescopePivot.position.set(0, 3.2, 0);
-    telescopePivot.rotation.x = -0.52;
+    telescopePivot.position.set(0, 2.85, -10.8);
+    telescopePivot.rotation.x = -0.42;
     observatory.add(telescopePivot);
     const barrel = this.mesh('grandTelescopeBarrel', new THREE.CylinderGeometry(0.38, 0.55, 4.8, 12), this.materials.get('lunarSilver'), telescopePivot);
     barrel.rotation.x = Math.PI / 2;
@@ -432,7 +657,7 @@ export class CelestialWorld {
     for (let i = 0; i < 8; i += 1) {
       const angle = (i / 8) * Math.PI * 2;
       matrix.compose(
-        new THREE.Vector3(Math.sin(angle) * 4.9, 1.35, Math.cos(angle) * 4.9),
+        new THREE.Vector3(Math.sin(angle) * 10.35, 1.35, Math.cos(angle) * 10.35),
         new THREE.Quaternion().setFromEuler(new THREE.Euler(0, angle, Math.sin(angle) * 0.12)),
         new THREE.Vector3(1, 1, 1),
       );

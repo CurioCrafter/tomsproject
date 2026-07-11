@@ -1,0 +1,621 @@
+import type {
+  CampaignRouteDefinition,
+  ObbRouteShape,
+  RouteSectionDefinition,
+  RouteShape,
+  Vec2Tuple,
+} from './RouteTypes';
+
+export type RouteValidationIssue = {
+  readonly path: string;
+  readonly message: string;
+};
+
+const EPSILON = 0.000_001;
+
+export const ROUTE_GATE_PARTITION_PLAYER_RADIUS = 0.52;
+
+export type RouteGatePartitionProbeOptions = {
+  /** Grid spacing in world units. Lower values are more precise and more expensive. */
+  readonly resolution?: number;
+  /** Radius of the largest player body that must be contained by the route. */
+  readonly playerRadius?: number;
+  /**
+   * Amount removed from the physical gate capsule during validation. Requiring
+   * a gate to partition with a slightly smaller capsule gives endpoint overlap
+   * enough tolerance for floating-point and authored-layout drift.
+   */
+  readonly gateClearanceMargin?: number;
+  /** Hard guard against accidentally rasterizing an unbounded or enormous route. */
+  readonly maximumCellCount?: number;
+};
+
+export type RouteGatePartitionProbeResult = {
+  readonly checkedGateIds: readonly string[];
+  readonly bypassableGateIds: readonly string[];
+  readonly baselineReachable: boolean;
+  readonly resolution: number;
+  readonly playerRadius: number;
+  readonly gateClearanceMargin: number;
+  readonly cellCount: number;
+};
+
+const DEFAULT_GATE_PARTITION_RESOLUTION = 0.2;
+const DEFAULT_GATE_CLEARANCE_MARGIN = 0.04;
+const DEFAULT_MAXIMUM_PARTITION_CELLS = 250_000;
+const defaultGatePartitionProbeCache = new WeakMap<CampaignRouteDefinition, RouteGatePartitionProbeResult>();
+
+function finite(value: number): boolean {
+  return Number.isFinite(value);
+}
+
+function finitePoint(point: Vec2Tuple): boolean {
+  return finite(point[0]) && finite(point[1]);
+}
+
+function shapeCenter(shape: RouteShape): Vec2Tuple {
+  return shape.center;
+}
+
+function routeShapeContainsCoordinates(shape: RouteShape, x: number, z: number, radius = 0): boolean {
+  const safeRadius = Math.max(0, radius);
+  const dx = x - shape.center[0];
+  const dz = z - shape.center[1];
+  if (shape.kind === 'circle') {
+    const allowed = shape.radius - safeRadius;
+    return allowed >= 0 && dx * dx + dz * dz <= allowed * allowed + EPSILON;
+  }
+
+  const cosine = Math.cos(shape.rotation);
+  const sine = Math.sin(shape.rotation);
+  const localX = cosine * dx + sine * dz;
+  const localZ = -sine * dx + cosine * dz;
+  return (
+    Math.abs(localX) <= shape.halfExtents[0] - safeRadius + EPSILON &&
+    Math.abs(localZ) <= shape.halfExtents[1] - safeRadius + EPSILON
+  );
+}
+
+export function routeShapeContainsPoint(shape: RouteShape, point: Vec2Tuple, radius = 0): boolean {
+  return routeShapeContainsCoordinates(shape, point[0], point[1], radius);
+}
+
+function pointInSection(section: RouteSectionDefinition, point: Vec2Tuple, radius = 0): boolean {
+  return section.walkable.some((shape) => routeShapeContainsPoint(shape, point, radius));
+}
+
+function circleObbOverlap(circle: Extract<RouteShape, { kind: 'circle' }>, obb: ObbRouteShape): boolean {
+  const dx = circle.center[0] - obb.center[0];
+  const dz = circle.center[1] - obb.center[1];
+  const cosine = Math.cos(obb.rotation);
+  const sine = Math.sin(obb.rotation);
+  const localX = cosine * dx + sine * dz;
+  const localZ = -sine * dx + cosine * dz;
+  const closestX = Math.max(-obb.halfExtents[0], Math.min(obb.halfExtents[0], localX));
+  const closestZ = Math.max(-obb.halfExtents[1], Math.min(obb.halfExtents[1], localZ));
+  const separationX = localX - closestX;
+  const separationZ = localZ - closestZ;
+  return separationX * separationX + separationZ * separationZ <= circle.radius * circle.radius + EPSILON;
+}
+
+function obbAxes(shape: ObbRouteShape): readonly [Vec2Tuple, Vec2Tuple] {
+  const cosine = Math.cos(shape.rotation);
+  const sine = Math.sin(shape.rotation);
+  return [[cosine, sine], [-sine, cosine]];
+}
+
+function dot(a: Vec2Tuple, b: Vec2Tuple): number {
+  return a[0] * b[0] + a[1] * b[1];
+}
+
+function obbOverlap(first: ObbRouteShape, second: ObbRouteShape): boolean {
+  const firstAxes = obbAxes(first);
+  const secondAxes = obbAxes(second);
+  const centerDelta: Vec2Tuple = [second.center[0] - first.center[0], second.center[1] - first.center[1]];
+  const axes = [...firstAxes, ...secondAxes];
+
+  for (const axis of axes) {
+    const distance = Math.abs(dot(centerDelta, axis));
+    const firstRadius =
+      first.halfExtents[0] * Math.abs(dot(firstAxes[0], axis)) +
+      first.halfExtents[1] * Math.abs(dot(firstAxes[1], axis));
+    const secondRadius =
+      second.halfExtents[0] * Math.abs(dot(secondAxes[0], axis)) +
+      second.halfExtents[1] * Math.abs(dot(secondAxes[1], axis));
+    if (distance > firstRadius + secondRadius + EPSILON) return false;
+  }
+  return true;
+}
+
+export function routeShapesOverlap(first: RouteShape, second: RouteShape): boolean {
+  if (first.kind === 'circle' && second.kind === 'circle') {
+    const dx = first.center[0] - second.center[0];
+    const dz = first.center[1] - second.center[1];
+    const radius = first.radius + second.radius;
+    return dx * dx + dz * dz <= radius * radius + EPSILON;
+  }
+  if (first.kind === 'circle' && second.kind === 'obb') return circleObbOverlap(first, second);
+  if (first.kind === 'obb' && second.kind === 'circle') return circleObbOverlap(second, first);
+  return obbOverlap(first as ObbRouteShape, second as ObbRouteShape);
+}
+
+function pointToSegmentDistanceSquared(
+  x: number,
+  z: number,
+  a: Vec2Tuple,
+  b: Vec2Tuple,
+): number {
+  const segmentX = b[0] - a[0];
+  const segmentZ = b[1] - a[1];
+  const lengthSquared = segmentX * segmentX + segmentZ * segmentZ;
+  const parameter = lengthSquared <= EPSILON
+    ? 0
+    : Math.max(0, Math.min(1, ((x - a[0]) * segmentX + (z - a[1]) * segmentZ) / lengthSquared));
+  const closestX = a[0] + segmentX * parameter;
+  const closestZ = a[1] + segmentZ * parameter;
+  const dx = x - closestX;
+  const dz = z - closestZ;
+  return dx * dx + dz * dz;
+}
+
+function routeGridBounds(
+  shapes: readonly RouteShape[],
+  resolution: number,
+): { readonly minX: number; readonly minZ: number; readonly columns: number; readonly rows: number } {
+  let minX = Number.POSITIVE_INFINITY;
+  let minZ = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxZ = Number.NEGATIVE_INFINITY;
+
+  for (const shape of shapes) {
+    let extentX: number;
+    let extentZ: number;
+    if (shape.kind === 'circle') {
+      extentX = shape.radius;
+      extentZ = shape.radius;
+    } else {
+      const cosine = Math.cos(shape.rotation);
+      const sine = Math.sin(shape.rotation);
+      extentX = Math.abs(cosine) * shape.halfExtents[0] + Math.abs(sine) * shape.halfExtents[1];
+      extentZ = Math.abs(sine) * shape.halfExtents[0] + Math.abs(cosine) * shape.halfExtents[1];
+    }
+    minX = Math.min(minX, shape.center[0] - extentX);
+    maxX = Math.max(maxX, shape.center[0] + extentX);
+    minZ = Math.min(minZ, shape.center[1] - extentZ);
+    maxZ = Math.max(maxZ, shape.center[1] + extentZ);
+  }
+
+  const snappedMinX = Math.floor((minX - resolution) / resolution) * resolution;
+  const snappedMinZ = Math.floor((minZ - resolution) / resolution) * resolution;
+  const snappedMaxX = Math.ceil((maxX + resolution) / resolution) * resolution;
+  const snappedMaxZ = Math.ceil((maxZ + resolution) / resolution) * resolution;
+  return {
+    minX: snappedMinX,
+    minZ: snappedMinZ,
+    columns: Math.round((snappedMaxX - snappedMinX) / resolution) + 1,
+    rows: Math.round((snappedMaxZ - snappedMinZ) / resolution) + 1,
+  };
+}
+
+/**
+ * Checks whether each encounter gate actually cuts the playable route between
+ * the campaign start and final section. The walkable union is rasterized once,
+ * then reused for every gate so the invariant is inexpensive enough to run as
+ * part of authored-route validation.
+ */
+export function probeRouteGatePartitions(
+  route: CampaignRouteDefinition,
+  options: RouteGatePartitionProbeOptions = {},
+): RouteGatePartitionProbeResult {
+  const usesDefaultOptions =
+    options.resolution === undefined &&
+    options.playerRadius === undefined &&
+    options.gateClearanceMargin === undefined &&
+    options.maximumCellCount === undefined;
+  if (usesDefaultOptions) {
+    const cached = defaultGatePartitionProbeCache.get(route);
+    if (cached) return cached;
+  }
+  const resolution = options.resolution ?? DEFAULT_GATE_PARTITION_RESOLUTION;
+  const playerRadius = options.playerRadius ?? ROUTE_GATE_PARTITION_PLAYER_RADIUS;
+  const gateClearanceMargin = options.gateClearanceMargin ?? DEFAULT_GATE_CLEARANCE_MARGIN;
+  const maximumCellCount = options.maximumCellCount ?? DEFAULT_MAXIMUM_PARTITION_CELLS;
+  if (!finite(resolution) || resolution <= 0) throw new Error('Gate partition resolution must be positive and finite.');
+  if (!finite(playerRadius) || playerRadius < 0) throw new Error('Gate partition player radius must be finite and non-negative.');
+  if (!finite(gateClearanceMargin) || gateClearanceMargin < 0) {
+    throw new Error('Gate partition clearance margin must be finite and non-negative.');
+  }
+  if (!Number.isInteger(maximumCellCount) || maximumCellCount <= 0) {
+    throw new Error('Gate partition maximum cell count must be a positive integer.');
+  }
+
+  const shapes = route.sections.flatMap<RouteShape>((section) => section.walkable);
+  const referencedGateIds = new Set<string>();
+  route.encounters.forEach((encounter) => {
+    if (encounter.rearGateId) referencedGateIds.add(encounter.rearGateId);
+    if (encounter.exitGateId) referencedGateIds.add(encounter.exitGateId);
+  });
+  const gates = route.gates.filter((gate) => referencedGateIds.has(gate.id));
+  if (shapes.length === 0) {
+    const result: RouteGatePartitionProbeResult = {
+      checkedGateIds: [],
+      bypassableGateIds: [],
+      baselineReachable: false,
+      resolution,
+      playerRadius,
+      gateClearanceMargin,
+      cellCount: 0,
+    };
+    if (usesDefaultOptions) defaultGatePartitionProbeCache.set(route, result);
+    return result;
+  }
+
+  const bounds = routeGridBounds(shapes, resolution);
+  const cellCount = bounds.columns * bounds.rows;
+  if (!Number.isSafeInteger(cellCount) || cellCount > maximumCellCount) {
+    throw new Error(
+      `Gate partition grid requires ${cellCount} cells, exceeding the ${maximumCellCount}-cell validation limit.`,
+    );
+  }
+
+  const walkable = new Uint8Array(cellCount);
+  for (let row = 0; row < bounds.rows; row += 1) {
+    const z = bounds.minZ + row * resolution;
+    for (let column = 0; column < bounds.columns; column += 1) {
+      const x = bounds.minX + column * resolution;
+      const index = row * bounds.columns + column;
+      walkable[index] = shapes.some((shape) => routeShapeContainsCoordinates(shape, x, z, playerRadius)) ? 1 : 0;
+    }
+  }
+
+  const nearestWalkableIndex = (point: Vec2Tuple): number => {
+    let nearest = -1;
+    let nearestDistanceSquared = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < cellCount; index += 1) {
+      if (walkable[index] === 0) continue;
+      const column = index % bounds.columns;
+      const row = Math.floor(index / bounds.columns);
+      const dx = bounds.minX + column * resolution - point[0];
+      const dz = bounds.minZ + row * resolution - point[1];
+      const distanceSquared = dx * dx + dz * dz;
+      if (distanceSquared >= nearestDistanceSquared) continue;
+      nearest = index;
+      nearestDistanceSquared = distanceSquared;
+    }
+    return nearest;
+  };
+
+  const orderedSections = [...route.sections].sort((first, second) => first.order - second.order);
+  const finalSection = orderedSections[orderedSections.length - 1];
+  const finalPoint = finalSection?.walkable[0]?.center;
+  const startIndex = nearestWalkableIndex(route.start.position);
+  const goalIndex = finalPoint ? nearestWalkableIndex(finalPoint) : -1;
+  if (startIndex < 0 || goalIndex < 0) {
+    throw new Error('Gate partition probe could not locate the campaign start or final section on the walkable grid.');
+  }
+
+  const queue = new Int32Array(cellCount);
+  const visitGeneration = new Uint32Array(cellCount);
+  let generation = 0;
+  const bypassableGateIds: string[] = [];
+  const neighborOffsets = [-1, 1, -bounds.columns, bounds.columns] as const;
+
+  const canReachGoal = (isBlocked: (index: number) => boolean): boolean => {
+    generation += 1;
+    if (isBlocked(startIndex) || isBlocked(goalIndex)) return false;
+    if (startIndex === goalIndex) return true;
+    let head = 0;
+    let tail = 0;
+    queue[tail] = startIndex;
+    tail += 1;
+    visitGeneration[startIndex] = generation;
+
+    while (head < tail) {
+      const current = queue[head];
+      head += 1;
+      const currentColumn = current % bounds.columns;
+      for (const offset of neighborOffsets) {
+        if (offset === -1 && currentColumn === 0) continue;
+        if (offset === 1 && currentColumn === bounds.columns - 1) continue;
+        const next = current + offset;
+        if (next < 0 || next >= cellCount || walkable[next] === 0 || visitGeneration[next] === generation) continue;
+        if (isBlocked(next)) continue;
+        if (next === goalIndex) return true;
+        visitGeneration[next] = generation;
+        queue[tail] = next;
+        tail += 1;
+      }
+    }
+    return false;
+  };
+
+  const baselineReachable = canReachGoal(() => false);
+
+  for (const gate of gates) {
+    const blockedRadius = Math.max(0, playerRadius + gate.collider.thickness * 0.5 - gateClearanceMargin);
+    const blockedRadiusSquared = blockedRadius * blockedRadius;
+    const isBlocked = (index: number): boolean => {
+      const column = index % bounds.columns;
+      const row = Math.floor(index / bounds.columns);
+      const x = bounds.minX + column * resolution;
+      const z = bounds.minZ + row * resolution;
+      return pointToSegmentDistanceSquared(x, z, gate.collider.a, gate.collider.b) <= blockedRadiusSquared + EPSILON;
+    };
+
+    if (canReachGoal(isBlocked)) bypassableGateIds.push(gate.id);
+  }
+
+  const result: RouteGatePartitionProbeResult = {
+    checkedGateIds: gates.map((gate) => gate.id),
+    bypassableGateIds,
+    baselineReachable,
+    resolution,
+    playerRadius,
+    gateClearanceMargin,
+    cellCount,
+  };
+  if (usesDefaultOptions) defaultGatePartitionProbeCache.set(route, result);
+  return result;
+}
+
+function validateUniqueIds(
+  values: readonly { readonly id: string }[],
+  path: string,
+  issues: RouteValidationIssue[],
+): Set<string> {
+  const ids = new Set<string>();
+  values.forEach((value, index) => {
+    if (value.id.trim().length === 0) issues.push({ path: `${path}[${index}].id`, message: 'ID must not be empty.' });
+    if (ids.has(value.id)) issues.push({ path: `${path}[${index}].id`, message: `Duplicate ID "${value.id}".` });
+    ids.add(value.id);
+  });
+  return ids;
+}
+
+function validateContiguousOrder(
+  values: readonly { readonly order: number }[],
+  path: string,
+  issues: RouteValidationIssue[],
+): void {
+  values.forEach((value, index) => {
+    if (!Number.isInteger(value.order) || value.order !== index) {
+      issues.push({ path: `${path}[${index}]`, message: `Items must be stored in contiguous order 0..${Math.max(0, values.length - 1)}.` });
+    }
+  });
+}
+
+function validateShape(shape: RouteShape, path: string, issues: RouteValidationIssue[]): void {
+  if (!finitePoint(shape.center)) issues.push({ path: `${path}.center`, message: 'Shape center must be finite.' });
+  if (shape.kind === 'circle') {
+    if (!finite(shape.radius) || shape.radius <= 0) issues.push({ path: `${path}.radius`, message: 'Circle radius must be positive.' });
+    return;
+  }
+  if (!finitePoint(shape.halfExtents) || shape.halfExtents[0] <= 0 || shape.halfExtents[1] <= 0) {
+    issues.push({ path: `${path}.halfExtents`, message: 'OBB half extents must be finite and positive.' });
+  }
+  if (!finite(shape.rotation)) issues.push({ path: `${path}.rotation`, message: 'OBB rotation must be finite.' });
+}
+
+export function validateRouteDefinition(route: CampaignRouteDefinition): readonly RouteValidationIssue[] {
+  const issues: RouteValidationIssue[] = [];
+  if (route.version !== 1) issues.push({ path: 'version', message: 'Only route schema version 1 is supported.' });
+  if (route.id.trim().length === 0) issues.push({ path: 'id', message: 'Route ID must not be empty.' });
+  if (route.name.trim().length === 0) issues.push({ path: 'name', message: 'Route name must not be empty.' });
+
+  const sectionIds = validateUniqueIds(route.sections, 'sections', issues);
+  const gateIds = validateUniqueIds(route.gates, 'gates', issues);
+  validateUniqueIds(route.checkpoints, 'checkpoints', issues);
+  const encounterIds = validateUniqueIds(route.encounters, 'encounters', issues);
+  validateContiguousOrder(route.sections, 'sections.order', issues);
+  validateContiguousOrder(route.checkpoints, 'checkpoints.order', issues);
+  validateContiguousOrder(route.encounters, 'encounters.order', issues);
+
+  if (route.sections.length === 0) issues.push({ path: 'sections', message: 'At least one route section is required.' });
+  if (!sectionIds.has(route.start.sectionId)) issues.push({ path: 'start.sectionId', message: 'Start section does not exist.' });
+  if (!finitePoint(route.start.position)) issues.push({ path: 'start.position', message: 'Start position must be finite.' });
+  if (!finite(route.start.facingRadians)) issues.push({ path: 'start.facingRadians', message: 'Start facing must be finite.' });
+
+  const sectionById = new Map(route.sections.map((section) => [section.id, section]));
+  route.sections.forEach((section, index) => {
+    const path = `sections[${index}]`;
+    if (section.name.trim().length === 0) issues.push({ path: `${path}.name`, message: 'Section name must not be empty.' });
+    if (section.walkable.length === 0) issues.push({ path: `${path}.walkable`, message: 'Section needs at least one walkable shape.' });
+    section.walkable.forEach((shape, shapeIndex) => validateShape(shape, `${path}.walkable[${shapeIndex}]`, issues));
+    if (!finitePoint(section.cameraForward) || Math.hypot(section.cameraForward[0], section.cameraForward[1]) <= EPSILON) {
+      issues.push({ path: `${path}.cameraForward`, message: 'Camera forward must be a finite non-zero vector.' });
+    }
+    for (const connectedId of section.connectsTo) {
+      if (!sectionIds.has(connectedId)) issues.push({ path: `${path}.connectsTo`, message: `Unknown section "${connectedId}".` });
+      if (connectedId === section.id) issues.push({ path: `${path}.connectsTo`, message: 'A section cannot connect to itself.' });
+    }
+    const anchorIds = validateUniqueIds(section.enemyAnchors, `${path}.enemyAnchors`, issues);
+    section.enemyAnchors.forEach((anchor, anchorIndex) => {
+      if (!pointInSection(section, anchor.position)) {
+        issues.push({ path: `${path}.enemyAnchors[${anchorIndex}].position`, message: 'Enemy anchor must lie inside its section.' });
+      }
+    });
+    if (anchorIds.size !== section.enemyAnchors.length) {
+      issues.push({ path: `${path}.enemyAnchors`, message: 'Enemy anchor IDs must be unique within a section.' });
+    }
+  });
+
+  const orderedSections = [...route.sections].sort((a, b) => a.order - b.order);
+  for (let index = 0; index < orderedSections.length - 1; index += 1) {
+    const current = orderedSections[index];
+    const next = orderedSections[index + 1];
+    if (!current.connectsTo.includes(next.id) || !next.connectsTo.includes(current.id)) {
+      issues.push({ path: `sections[${current.order}].connectsTo`, message: `Ordered sections "${current.id}" and "${next.id}" must be linked both ways.` });
+    }
+    const overlaps = current.walkable.some((first) => next.walkable.some((second) => routeShapesOverlap(first, second)));
+    if (!overlaps) {
+      issues.push({ path: `sections[${current.order}].walkable`, message: `Ordered sections "${current.id}" and "${next.id}" do not overlap.` });
+    }
+  }
+
+  const startSection = sectionById.get(route.start.sectionId);
+  if (startSection && !startSection.safe) issues.push({ path: 'start.sectionId', message: 'Campaign must start in a safe section.' });
+  if (startSection && !pointInSection(startSection, route.start.position)) {
+    issues.push({ path: 'start.position', message: 'Start position must lie inside the start section.' });
+  }
+
+  route.gates.forEach((gate, index) => {
+    const path = `gates[${index}]`;
+    if (!sectionIds.has(gate.sectionId)) issues.push({ path: `${path}.sectionId`, message: 'Gate section does not exist.' });
+    if (!finitePoint(gate.collider.a) || !finitePoint(gate.collider.b)) {
+      issues.push({ path: `${path}.collider`, message: 'Gate endpoints must be finite.' });
+    }
+    const length = Math.hypot(gate.collider.b[0] - gate.collider.a[0], gate.collider.b[1] - gate.collider.a[1]);
+    if (length <= EPSILON) issues.push({ path: `${path}.collider`, message: 'Gate segment must have non-zero length.' });
+    if (!finite(gate.collider.thickness) || gate.collider.thickness <= 0) {
+      issues.push({ path: `${path}.collider.thickness`, message: 'Gate thickness must be positive.' });
+    }
+  });
+
+  const encounterById = new Map(route.encounters.map((encounter) => [encounter.id, encounter]));
+  const globalSpawnIds = new Set<string>();
+  let midpointBosses = 0;
+  let finalBosses = 0;
+  route.encounters.forEach((encounter, index) => {
+    const path = `encounters[${index}]`;
+    encounter.sectionIds.forEach((sectionId) => {
+      if (!sectionIds.has(sectionId)) issues.push({ path: `${path}.sectionIds`, message: `Unknown section "${sectionId}".` });
+    });
+    validateShape(encounter.activation, `${path}.activation`, issues);
+    const activationCenter = shapeCenter(encounter.activation);
+    const activationInside = encounter.sectionIds.some((sectionId) => {
+      const section = sectionById.get(sectionId);
+      return section ? pointInSection(section, activationCenter) : false;
+    });
+    if (!activationInside) issues.push({ path: `${path}.activation`, message: 'Encounter activation center must lie in one of its sections.' });
+    if (encounter.rearGateId && !gateIds.has(encounter.rearGateId)) issues.push({ path: `${path}.rearGateId`, message: 'Rear gate does not exist.' });
+    if (encounter.exitGateId && !gateIds.has(encounter.exitGateId)) issues.push({ path: `${path}.exitGateId`, message: 'Exit gate does not exist.' });
+    if (encounter.spawns.length === 0) issues.push({ path: `${path}.spawns`, message: 'Encounter must contain at least one spawn.' });
+
+    let bossRoleCount = 0;
+    encounter.spawns.forEach((spawn, spawnIndex) => {
+      const spawnPath = `${path}.spawns[${spawnIndex}]`;
+      if (globalSpawnIds.has(spawn.id)) issues.push({ path: `${spawnPath}.id`, message: `Duplicate global spawn ID "${spawn.id}".` });
+      globalSpawnIds.add(spawn.id);
+      const section = sectionById.get(spawn.sectionId);
+      if (!section || !encounter.sectionIds.includes(spawn.sectionId)) {
+        issues.push({ path: `${spawnPath}.sectionId`, message: 'Spawn section must belong to its encounter.' });
+      } else if (!pointInSection(section, spawn.position)) {
+        issues.push({ path: `${spawnPath}.position`, message: 'Spawn must lie inside its section.' });
+      }
+      if (!finite(spawn.facingRadians)) issues.push({ path: `${spawnPath}.facingRadians`, message: 'Spawn facing must be finite.' });
+      if (spawn.wakeDelaySeconds !== undefined && (!finite(spawn.wakeDelaySeconds) || spawn.wakeDelaySeconds < 0)) {
+        issues.push({ path: `${spawnPath}.wakeDelaySeconds`, message: 'Wake delay must be finite and non-negative.' });
+      }
+      if (spawn.leashSectionIds.length === 0 || !spawn.leashSectionIds.includes(spawn.sectionId)) {
+        issues.push({ path: `${spawnPath}.leashSectionIds`, message: 'Leash sections must include the spawn section.' });
+      }
+      spawn.leashSectionIds.forEach((sectionId) => {
+        if (!encounter.sectionIds.includes(sectionId)) issues.push({ path: `${spawnPath}.leashSectionIds`, message: `Leash section "${sectionId}" is outside the encounter.` });
+      });
+      if (spawn.anchorId) {
+        const anchorExists = section?.enemyAnchors.some((anchor) => anchor.id === spawn.anchorId) ?? false;
+        if (!anchorExists) issues.push({ path: `${spawnPath}.anchorId`, message: 'Spawn anchor does not exist in its section.' });
+      }
+      if (spawn.role === 'boss') bossRoleCount += 1;
+    });
+
+    if (encounter.boss === 'none' && bossRoleCount > 0) issues.push({ path: `${path}.boss`, message: 'Non-boss encounter cannot contain a boss-role spawn.' });
+    if (encounter.boss !== 'none' && bossRoleCount !== 1) issues.push({ path: `${path}.spawns`, message: 'Boss encounter must contain exactly one boss-role spawn.' });
+    if (encounter.boss === 'midpoint') {
+      midpointBosses += 1;
+      if (!encounter.spawns.some((spawn) => spawn.kind === 'orreryCastellan')) {
+        issues.push({ path: `${path}.spawns`, message: 'Midpoint boss encounter must contain the Orrery Castellan.' });
+      }
+    }
+    if (encounter.boss === 'final') {
+      finalBosses += 1;
+      if (!encounter.spawns.some((spawn) => spawn.kind === 'eclipseArchon')) {
+        issues.push({ path: `${path}.spawns`, message: 'Final boss encounter must contain the Eclipse Archon.' });
+      }
+      if (encounter.order !== route.encounters.length - 1) issues.push({ path: `${path}.order`, message: 'Final boss encounter must be last.' });
+    }
+  });
+  if (midpointBosses < 1) issues.push({ path: 'encounters', message: 'Route requires a midpoint boss.' });
+  if (finalBosses !== 1) issues.push({ path: 'encounters', message: 'Route requires exactly one final boss.' });
+
+  route.checkpoints.forEach((checkpoint, index) => {
+    const path = `checkpoints[${index}]`;
+    const section = sectionById.get(checkpoint.sectionId);
+    if (!section) issues.push({ path: `${path}.sectionId`, message: 'Checkpoint section does not exist.' });
+    else if (!pointInSection(section, checkpoint.position)) issues.push({ path: `${path}.position`, message: 'Checkpoint must lie inside its section.' });
+    if (!finite(checkpoint.facingRadians)) issues.push({ path: `${path}.facingRadians`, message: 'Checkpoint facing must be finite.' });
+    if (!finite(checkpoint.activationRadius) || checkpoint.activationRadius <= 0) {
+      issues.push({ path: `${path}.activationRadius`, message: 'Checkpoint activation radius must be positive.' });
+    }
+    if (!encounterIds.has(checkpoint.unlocksAfterEncounterId)) {
+      issues.push({ path: `${path}.unlocksAfterEncounterId`, message: 'Checkpoint unlock encounter does not exist.' });
+    }
+    const unlockEncounter = encounterById.get(checkpoint.unlocksAfterEncounterId);
+    if (unlockEncounter && index > 0) {
+      const previous = route.checkpoints[index - 1];
+      const previousEncounter = encounterById.get(previous.unlocksAfterEncounterId);
+      if (previousEncounter && unlockEncounter.order <= previousEncounter.order) {
+        issues.push({ path: `${path}.unlocksAfterEncounterId`, message: 'Checkpoint unlock encounters must advance in route order.' });
+      }
+    }
+  });
+
+  if (!Number.isInteger(route.requirements.encounterCount) || route.requirements.encounterCount <= 0) {
+    issues.push({ path: 'requirements.encounterCount', message: 'Required encounter count must be a positive integer.' });
+  } else if (route.encounters.length !== route.requirements.encounterCount) {
+    issues.push({ path: 'encounters', message: `Expected exactly ${route.requirements.encounterCount} encounters.` });
+  }
+  if (!Number.isInteger(route.requirements.minimumBridgeSections) || route.requirements.minimumBridgeSections < 0) {
+    issues.push({ path: 'requirements.minimumBridgeSections', message: 'Minimum bridge section count must be a non-negative integer.' });
+  }
+  const bridgeCount = route.sections.filter((section) => section.kind === 'bridge' || section.kind === 'causeway').length;
+  if (bridgeCount < route.requirements.minimumBridgeSections) {
+    issues.push({ path: 'sections', message: `Expected at least ${route.requirements.minimumBridgeSections} bridge/causeway sections.` });
+  }
+  const actualRelicOrder = [...route.checkpoints].sort((a, b) => a.order - b.order).map((checkpoint) => checkpoint.relicKind);
+  if (
+    actualRelicOrder.length !== route.requirements.relicOrder.length ||
+    actualRelicOrder.some((kind, index) => kind !== route.requirements.relicOrder[index])
+  ) {
+    issues.push({ path: 'checkpoints', message: `Relic checkpoint order must be ${route.requirements.relicOrder.join(' -> ')}.` });
+  }
+  const actualEnemyKinds = new Set(route.encounters.flatMap((encounter) => encounter.spawns.map((spawn) => spawn.kind)));
+  route.requirements.enemyKinds.forEach((kind) => {
+    if (!actualEnemyKinds.has(kind)) issues.push({ path: 'encounters.spawns', message: `Required enemy kind "${kind}" is missing.` });
+  });
+
+  if (route.sections.length > 0 && route.gates.length > 0) {
+    try {
+      const partitionProbe = probeRouteGatePartitions(route);
+      if (!partitionProbe.baselineReachable) {
+        issues.push({
+          path: 'sections',
+          message: 'Ungated player-walkable route does not connect the campaign start to the final section.',
+        });
+      }
+      partitionProbe.bypassableGateIds.forEach((gateId) => {
+        const gateIndex = route.gates.findIndex((gate) => gate.id === gateId);
+        issues.push({
+          path: gateIndex >= 0 ? `gates[${gateIndex}].collider` : 'gates',
+          message: `Closed gate "${gateId}" does not form a valid partition of the player-walkable route union.`,
+        });
+      });
+    } catch (error) {
+      issues.push({
+        path: 'gates',
+        message: `Gate partition validation failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+
+  return issues;
+}
+
+export function assertValidRouteDefinition<T extends CampaignRouteDefinition>(route: T): T {
+  const issues = validateRouteDefinition(route);
+  if (issues.length > 0) {
+    const details = issues.map((issue) => `${issue.path}: ${issue.message}`).join('\n');
+    throw new Error(`Invalid campaign route "${route.id}":\n${details}`);
+  }
+  return route;
+}

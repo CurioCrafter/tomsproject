@@ -21,7 +21,7 @@ function parseArgs(argv) {
     else if (value === '--wait') args.wait = Number(argv[++i]);
     else if (value === '--state') args.state = argv[++i];
     else if (value === '-h' || value === '--help') {
-      console.log('Usage: inspect-threejs-canvas.mjs [--url URL] [--out DIR] [--mobile] [--wait MS] [--state active|boundary|boss|death|victory]');
+      console.log('Usage: inspect-threejs-canvas.mjs [--url URL] [--out DIR] [--mobile] [--wait MS] [--state active|boundary|bridge|midboss|finalboss|death|victory]');
       process.exit(0);
     } else {
       throw new Error(`Unknown argument: ${value}`);
@@ -99,13 +99,16 @@ async function main() {
   });
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
-  await page.goto(args.url, { waitUntil: 'networkidle' });
+  await page.goto(args.url, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('canvas', { state: 'visible', timeout: 10_000 });
-  const enter = page.locator('#enter-game');
-  if (await enter.isVisible().catch(() => false)) {
-    // The game hides the title veil immediately on activation, which can race
-    // Playwright's pointer-actionability checks on slower remote deployments.
-    await enter.evaluate((element) => element.click());
+  const begin = page.locator('#begin-pilgrimage');
+  if (await begin.isVisible().catch(() => false)) {
+    await begin.click();
+    await page.locator('#front-end-layer').waitFor({ state: 'hidden', timeout: 2_000 }).catch(() => undefined);
+  } else {
+    // Keep the compatibility hook for inspecting older deployed builds.
+    const enter = page.locator('#enter-game');
+    await enter.evaluate((element) => element.click()).catch(() => undefined);
     await page.locator('#title-veil').waitFor({ state: 'hidden', timeout: 2_000 }).catch(() => undefined);
   }
   if (args.state === 'boundary') {
@@ -115,9 +118,13 @@ async function main() {
     await page.keyboard.down('KeyA');
     await page.waitForTimeout(3_300);
     await page.keyboard.up('KeyA');
-  } else if (args.state === 'boss' || args.state === 'victory') {
-    await page.evaluate(() => window.__CELESTIAL_GAME_TEST__?.spawnBoss());
-    if (args.state === 'victory') await page.evaluate(() => window.__CELESTIAL_GAME_TEST__?.defeatBoss());
+  } else if (args.state === 'bridge') {
+    await page.evaluate(() => window.__CELESTIAL_GAME_TEST__?.showSection('fallen-orbit-bridge'));
+  } else if (args.state === 'midboss') {
+    await page.evaluate(() => window.__CELESTIAL_GAME_TEST__?.showEncounter('orrery-castellan'));
+  } else if (args.state === 'boss' || args.state === 'finalboss' || args.state === 'victory') {
+    await page.evaluate(() => window.__CELESTIAL_GAME_TEST__?.showEncounter('eclipse-archon'));
+    if (args.state === 'victory') await page.evaluate(() => window.__CELESTIAL_GAME_TEST__?.defeatActiveEncounter());
   } else if (args.state === 'death') {
     await page.evaluate(() => window.__CELESTIAL_GAME_TEST__?.damagePlayer(9999));
   } else {

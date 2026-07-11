@@ -60,6 +60,12 @@ export type HudDiscoverySnapshot = {
 
 export type HudMenuState = 'none' | 'pause' | 'settings' | 'death' | 'victory';
 
+export const HUD_MENU_STATE_EVENT = 'celestial-hud-menu-state' as const;
+
+export type HudMenuStateDetail = {
+  state: HudMenuState;
+};
+
 export type HudSnapshot = {
   vitality: HudResourceSnapshot;
   focus: HudResourceSnapshot;
@@ -110,7 +116,7 @@ type RuntimeGameState = {
     maxStamina?: number;
   };
   enemies?: { active?: number; defeated?: number };
-  boss?: { spawned?: boolean; active?: boolean; health?: number; maxHealth?: number; phase?: number };
+  boss?: { spawned?: boolean; active?: boolean; health?: number; maxHealth?: number; phase?: number; name?: string; epithet?: string };
   progression?: { restored?: number; target?: number };
   affinity?: { celestial?: number; wrathful?: number; mercy?: number };
   comprehension?: {
@@ -235,6 +241,10 @@ export class Hud {
   private readonly discoveryDetail = this.getElement('#discovery-detail');
   private readonly menuLayer = this.getElement('#menu-layer');
   private readonly menuPanels = Array.from(document.querySelectorAll<HTMLElement>('[data-menu-panel]'));
+  private readonly menuBackgroundElements = ['#game-canvas', '#hud', '#touch-controls']
+    .map((selector) => document.querySelector<HTMLElement>(selector))
+    .filter((element): element is HTMLElement => element !== null);
+  private readonly menuBackgroundStates = new Map<HTMLElement, { inert: boolean; ariaHidden: string | null }>();
   private readonly titleVeil = this.getElement('#title-veil');
   private readonly motionSetting = this.getElement<HTMLInputElement>('#motion-setting');
   private readonly abortController = new AbortController();
@@ -256,8 +266,6 @@ export class Hud {
     this.applyReducedMotion(this.snapshot.reducedMotion);
     this.bindInterface();
     this.render();
-
-    this.titleTimer = window.setTimeout(() => this.dismissTitle(), 3600);
   }
 
   /** Full state API for simulation-driven HUD updates. */
@@ -370,6 +378,7 @@ export class Hud {
     this.snapshot = { ...this.snapshot, menu: state };
     const isOpen = state !== 'none';
     this.menuLayer.hidden = !isOpen;
+    this.menuLayer.setAttribute('aria-hidden', String(!isOpen));
 
     for (const panel of this.menuPanels) {
       panel.hidden = panel.dataset.menuPanel !== state;
@@ -378,17 +387,27 @@ export class Hud {
     if (isOpen) {
       this.focusedBeforeMenu ??= document.activeElement instanceof HTMLElement ? document.activeElement : null;
       document.body.dataset.gameState = state;
-      window.requestAnimationFrame(() => {
-        this.menuPanels
-          .find((panel) => panel.dataset.menuPanel === state)
-          ?.querySelector<HTMLElement>('button, input')
-          ?.focus();
-      });
     } else {
       document.body.dataset.gameState = 'playing';
-      this.focusedBeforeMenu?.focus();
+    }
+
+    this.setMenuBackgroundInert(isOpen);
+    this.dispatchMenuState(state);
+
+    if (isOpen) {
+      window.requestAnimationFrame(() => {
+        if (this.snapshot.menu !== state) return;
+        this.focusableMenuElements(this.visibleMenuPanel())?.[0]?.focus({ preventScroll: true });
+      });
+    } else {
+      this.focusedBeforeMenu?.focus({ preventScroll: true });
       this.focusedBeforeMenu = null;
     }
+  }
+
+  showSettingsFrom(returnTo: HudMenuState): void {
+    this.menuBeforeSettings = returnTo;
+    this.showMenu('settings');
   }
 
   dismissTitle(): void {
@@ -402,6 +421,7 @@ export class Hud {
   }
 
   dispose(): void {
+    if (this.snapshot.menu !== 'none') this.showMenu('none');
     this.abortController.abort();
     if (this.discoveryTimer !== null) window.clearTimeout(this.discoveryTimer);
     if (this.titleTimer !== null) window.clearTimeout(this.titleTimer);
@@ -445,6 +465,10 @@ export class Hud {
       'keydown',
       (event) => {
         if (!this.titleVeil.hidden) this.dismissTitle();
+        if (event.key === 'Tab' && this.snapshot.menu !== 'none') {
+          this.trapMenuTab(event);
+          return;
+        }
         if (event.code !== 'Escape') return;
         if (this.snapshot.menu === 'settings') {
           event.preventDefault();
@@ -455,6 +479,12 @@ export class Hud {
         }
       },
       { signal },
+    );
+
+    window.addEventListener(
+      'focusin',
+      (event) => this.keepFocusInsideMenu(event),
+      { capture: true, signal },
     );
 
     this.motionSetting.addEventListener(
@@ -559,8 +589,8 @@ export class Hud {
       },
       boss: {
         visible: Boolean(boss.spawned && boss.active),
-        name: 'The Eclipse Archon',
-        epithet: 'Devourer of the Returned Light',
+        name: boss.name || 'The Eclipse Archon',
+        epithet: boss.epithet || 'Devourer of the Returned Light',
         phase: this.formatPhase(boss.phase ?? 1),
         current: boss.health ?? this.snapshot.boss.current,
         max: boss.maxHealth ?? this.snapshot.boss.max,
@@ -696,6 +726,72 @@ export class Hud {
   private applyReducedMotion(enabled: boolean): void {
     document.documentElement.dataset.reducedMotion = String(enabled);
     this.motionSetting.checked = enabled;
+  }
+
+  private dispatchMenuState(state: HudMenuState): void {
+    const detail: HudMenuStateDetail = { state };
+    window.dispatchEvent(new CustomEvent<HudMenuStateDetail>(HUD_MENU_STATE_EVENT, { detail }));
+  }
+
+  private setMenuBackgroundInert(inert: boolean): void {
+    for (const element of this.menuBackgroundElements) {
+      if (inert) {
+        if (!this.menuBackgroundStates.has(element)) {
+          this.menuBackgroundStates.set(element, {
+            inert: element.inert,
+            ariaHidden: element.getAttribute('aria-hidden'),
+          });
+        }
+        element.inert = true;
+        element.setAttribute('aria-hidden', 'true');
+      } else {
+        const previous = this.menuBackgroundStates.get(element);
+        if (!previous) continue;
+        element.inert = previous.inert;
+        if (previous.ariaHidden === null) element.removeAttribute('aria-hidden');
+        else element.setAttribute('aria-hidden', previous.ariaHidden);
+        this.menuBackgroundStates.delete(element);
+      }
+    }
+  }
+
+  private visibleMenuPanel(): HTMLElement | null {
+    return this.menuPanels.find((panel) => !panel.hidden) ?? null;
+  }
+
+  private focusableMenuElements(panel: HTMLElement | null = this.visibleMenuPanel()): HTMLElement[] {
+    if (!panel) return [];
+    return Array.from(
+      panel.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter((element) => element.getClientRects().length > 0);
+  }
+
+  private trapMenuTab(event: KeyboardEvent): void {
+    const panel = this.visibleMenuPanel();
+    const focusable = this.focusableMenuElements(panel);
+    if (!panel || focusable.length === 0) return;
+    event.stopImmediatePropagation();
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+
+    if (event.shiftKey && (active === first || !panel.contains(active))) {
+      event.preventDefault();
+      last.focus({ preventScroll: true });
+    } else if (!event.shiftKey && (active === last || !panel.contains(active))) {
+      event.preventDefault();
+      first.focus({ preventScroll: true });
+    }
+  }
+
+  private keepFocusInsideMenu(event: FocusEvent): void {
+    if (this.snapshot.menu === 'none') return;
+    const panel = this.visibleMenuPanel();
+    const target = event.target;
+    if (!panel || (target instanceof Node && panel.contains(target))) return;
+    this.focusableMenuElements(panel)[0]?.focus({ preventScroll: true });
   }
 
   private visibleMenu(): HudMenuState {

@@ -36,18 +36,29 @@ export class MaterialLibrary {
   readonly textures: ProceduralTextureSet;
   readonly roles: MaterialRoles;
   private readonly ownsTextures: boolean;
+  private readonly generatedTextures = new Set<THREE.Texture>();
   private disposed = false;
 
   constructor(options: MaterialLibraryOptions = {}) {
     this.textures = options.textures ?? createProceduralTextures();
     this.ownsTextures = options.ownsTextures ?? !options.textures;
     if (options.anisotropy) setProceduralTextureAnisotropy(this.textures, options.anisotropy);
+    const celestialBlackstone = this.loadGeneratedTexture(
+      '/assets/textures/celestial-blackstone.webp',
+      'generatedCelestialBlackstone',
+      4,
+    );
+    const midnightStarweave = this.loadGeneratedTexture(
+      '/assets/textures/midnight-starweave.webp',
+      'generatedMidnightStarweave',
+      2.5,
+    );
 
     this.roles = {
       blackSlate: new THREE.MeshStandardMaterial({
         name: 'material.blackSlate',
-        color: '#26363f',
-        map: this.textures.slate,
+        color: '#aeb8bb',
+        map: celestialBlackstone,
         roughness: 0.92,
         metalness: 0.04,
       }),
@@ -74,7 +85,11 @@ export class MaterialLibrary {
       }),
       robe: new THREE.MeshStandardMaterial({
         name: 'material.robe',
-        color: '#19213a',
+        color: '#a9b8dd',
+        map: midnightStarweave,
+        emissive: '#15213f',
+        emissiveMap: midnightStarweave,
+        emissiveIntensity: 0.24,
         roughness: 0.82,
         metalness: 0,
       }),
@@ -181,12 +196,30 @@ export class MaterialLibrary {
 
   setAnisotropy(anisotropy: number): void {
     setProceduralTextureAnisotropy(this.textures, anisotropy);
+    const value = Math.max(1, Math.floor(anisotropy));
+    this.generatedTextures.forEach((texture) => {
+      texture.anisotropy = value;
+    });
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     new Set(Object.values(this.roles)).forEach((material) => material.dispose());
+    this.generatedTextures.forEach((texture) => texture.dispose());
     if (this.ownsTextures) disposeProceduralTextures(this.textures);
+  }
+
+  private loadGeneratedTexture(url: string, name: string, repeat: number): THREE.Texture {
+    const texture = new THREE.TextureLoader().load(url);
+    texture.name = name;
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(repeat, repeat);
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    this.generatedTextures.add(texture);
+    return texture;
   }
 }

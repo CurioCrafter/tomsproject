@@ -23,15 +23,20 @@ type TestHooks = {
   restoreNextBody(): void;
   spawnBoss(): void;
   defeatBoss(): void;
+  victoryTrade(): void;
   restart(): void;
 };
 
 async function enterGame(page: Page): Promise<void> {
   await page.goto('/');
   await expect(page.locator('#game-canvas')).toBeVisible();
+  await page.waitForFunction(
+    () => ((window as unknown as { __THREE_GAME_DIAGNOSTICS__?: Diagnostics }).__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 10,
+  );
   await page.locator('#enter-game').evaluate((element) => (element as HTMLButtonElement).click());
+  await expect(page.locator('#front-end-layer')).toBeHidden();
   await expect(page.locator('#title-veil')).toBeHidden();
-  await page.waitForFunction(() => ((window as unknown as { __THREE_GAME_DIAGNOSTICS__?: Diagnostics }).__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 10);
+  await expect.poll(async () => (await diagnostics(page)).phase).toBe('exploration');
 }
 
 async function diagnostics(page: Page): Promise<Diagnostics> {
@@ -107,8 +112,10 @@ test('relics, boss, death checkpoint, victory, and new run form a complete loop'
   await expect.poll(async () => (await diagnostics(page)).phase).toBe('dead');
   await expect(page.locator('[data-menu-panel="death"]')).toBeVisible();
   await page.locator('[data-menu-panel="death"] [data-game-intent="restart"]').click();
-  await expect.poll(async () => (await diagnostics(page)).phase).toBe('boss');
+  await expect.poll(async () => (await diagnostics(page)).phase).toBe('exploration');
   expect((await diagnostics(page)).player.health).toBe((await diagnostics(page)).player.maxHealth);
+  await useHooks(page, function boss() {});
+  await expect.poll(async () => (await diagnostics(page)).phase).toBe('boss');
 
   await useHooks(page, function victory() {});
   await expect.poll(async () => (await diagnostics(page)).phase).toBe('victory');
@@ -133,4 +140,19 @@ test('mobile action controls emit intents and retain practical target sizes', as
     expect(box?.width ?? 0, `${selector} width`).toBeGreaterThanOrEqual(44);
     expect(box?.height ?? 0, `${selector} height`).toBeGreaterThanOrEqual(44);
   }
+});
+
+test('a lethal final-boss trade resolves to terminal victory', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes('mobile'), 'One deterministic terminal-state proof is sufficient.');
+  await enterGame(page);
+  await page.evaluate(() => {
+    const hooks = window.__CELESTIAL_GAME_TEST__ as unknown as TestHooks | undefined;
+    if (!hooks) throw new Error('Missing development test hooks.');
+    hooks.spawnBoss();
+    hooks.victoryTrade();
+  });
+  await expect.poll(async () => (await diagnostics(page)).phase).toBe('victory');
+  await page.waitForTimeout(250);
+  expect((await diagnostics(page)).phase).toBe('victory');
+  expect((await diagnostics(page)).victory).toBe(true);
 });

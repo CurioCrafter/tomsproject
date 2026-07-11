@@ -257,6 +257,10 @@ export class Player {
     this.charms.add(name);
   }
 
+  setEquipment(equipment: Partial<PlayerEquipment>): void {
+    Object.assign(this.equipment, equipment);
+  }
+
   restoreAt(position: THREE.Vector3): void {
     this.group.position.copy(position);
     this.group.position.y = 0.02;

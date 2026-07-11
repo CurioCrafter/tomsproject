@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import {
   createCelestialAstrolabe,
+  createConstellationReliquary,
+  createEnemyModel,
   createEclipseArchonBoss,
   createMoonwellRelic,
   createSorcererModel,
@@ -11,28 +13,42 @@ import { Loop } from '../core/Loop';
 import { createRenderer, resizeRenderer } from '../core/Renderer';
 import { CelestialRelic, type RelicKind } from '../entities/CelestialRelic';
 import { CombatProjectile } from '../entities/CombatProjectile';
-import { Enemy, type EnemyAttackEvent, type EnemyKind } from '../entities/Enemy';
+import { Enemy, type EnemyAttackEvent } from '../entities/Enemy';
 import { Player, type ArenaBounds, type SpellComprehension } from '../entities/Player';
 import { AudioSystem } from '../systems/AudioSystem';
 import { CameraRig } from '../systems/CameraRig';
 import { CollisionSystem, type CircleObstacle } from '../systems/CollisionSystem';
 import { DebugTools, type DebugTuning } from '../systems/DebugTools';
+import { EncounterDirector } from '../systems/EncounterDirector';
 import { Hud } from '../systems/Hud';
 import { VfxSystem } from '../systems/VfxSystem';
 import { disposeObject3D } from '../utils/dispose';
 import { CelestialWorld } from '../world/CelestialWorld';
+import {
+  DEFAULT_CHARACTER_PROFILE,
+  sanitizeCharacterProfile,
+  type CharacterProfile,
+} from './CharacterProfile';
+import { appearanceFromProfile, appearanceSignature } from './CharacterAppearance';
+import type { FrontEndIntentDetail } from '../ui/FrontEndController';
+import { FIRMAMENT_ROUTE, FIRMAMENT_ROUTE_WALKABLE } from './content/FirmamentRoute';
+import type { EncounterDefinition, RouteEnemyKind, RouteSectionDefinition, RouteShape } from './content/RouteTypes';
 
 const ARENA: ArenaBounds = {
-  halfWidth: 34,
-  halfDepth: 27,
+  halfWidth: 30,
+  halfDepth: 82,
 };
 
 const FIXED_STEP = 1 / 60;
 const PROGRESSION_TARGET = 4;
-const START_POSITION = new THREE.Vector3(0, 0.02, 21);
-const BOSS_POSITION = new THREE.Vector3(0, 0, -22.5);
+const START_POSITION = new THREE.Vector3(FIRMAMENT_ROUTE.start.position[0], 0.02, FIRMAMENT_ROUTE.start.position[1]);
+const FINAL_BOSS_SPAWN = FIRMAMENT_ROUTE.encounters
+  .find((encounter) => encounter.boss === 'final')
+  ?.spawns.find((spawn) => spawn.kind === 'eclipseArchon');
+if (!FINAL_BOSS_SPAWN) throw new Error('The firmament route requires a final Eclipse Archon spawn.');
+const BOSS_POSITION = new THREE.Vector3(FINAL_BOSS_SPAWN.position[0], 0, FINAL_BOSS_SPAWN.position[1]);
 
-type GamePhase = 'exploration' | 'boss' | 'dead' | 'victory' | 'paused';
+type GamePhase = 'menu' | 'exploration' | 'boss' | 'dead' | 'victory' | 'paused';
 type DamageSource = 'melee' | 'lunar' | 'aurora';
 
 type AffinityState = {
@@ -54,6 +70,12 @@ type TestHooks = {
   spawnBoss: () => void;
   defeatBoss: () => void;
   restart: () => void;
+  activateNextEncounter: () => void;
+  defeatActiveEncounter: () => void;
+  claimAvailableCheckpoint: () => void;
+  showEncounter: (encounterId: string) => void;
+  showSection: (sectionId: string) => void;
+  victoryTrade: () => void;
 };
 
 type RuntimeWindow = Window & {
@@ -61,29 +83,23 @@ type RuntimeWindow = Window & {
   __CELESTIAL_GAME_TEST__?: TestHooks;
 };
 
-const RELIC_DATA: ReadonlyArray<{ kind: RelicKind; position: [number, number] }> = [
-  { kind: 'moon', position: [-22, 8] },
-  { kind: 'aurora', position: [21, 5] },
-  { kind: 'constellation', position: [0, -12] },
-];
+const RELIC_DATA: ReadonlyArray<{ kind: RelicKind; position: readonly [number, number]; checkpointId: string }> =
+  FIRMAMENT_ROUTE.checkpoints.map((checkpoint) => ({
+    kind: checkpoint.relicKind,
+    position: checkpoint.position,
+    checkpointId: checkpoint.id,
+  }));
 
-const OBSTACLES: readonly CircleObstacle[] = [
-  { x: 0, z: 4, radius: 2.15 },
-  { x: -11, z: -2, radius: 1.15 },
-  { x: 11, z: -3, radius: 1.2 },
-  { x: -8, z: 15, radius: 0.82 },
-  { x: 9, z: 14, radius: 0.82 },
-  { x: -17, z: -14, radius: 1.05 },
-  { x: 17, z: -15, radius: 1.05 },
-];
+const OBSTACLES: readonly CircleObstacle[] = [];
 
 export class Game {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
-  private readonly camera = new THREE.PerspectiveCamera(47, 1, 0.1, 130);
+  private readonly camera = new THREE.PerspectiveCamera(47, 1, 0.1, 190);
   private readonly input: InputController;
   private readonly player = new Player();
   private readonly collision = new CollisionSystem();
+  private readonly encounterDirector = new EncounterDirector(FIRMAMENT_ROUTE);
   private readonly audio = new AudioSystem();
   private readonly hud = new Hud();
   private readonly cameraRig = new CameraRig(this.camera);
@@ -93,14 +109,21 @@ export class Game {
   private readonly world = new CelestialWorld(this.materials, {
     arenaHalfWidth: ARENA.halfWidth,
     arenaHalfDepth: ARENA.halfDepth,
-    worldRadius: 62,
+    worldRadius: 112,
   });
   private readonly vfx = new VfxSystem(this.materials);
   private readonly relics: CelestialRelic[] = [];
+  private readonly relicCheckpointIds = new Map<CelestialRelic, string>();
   private readonly enemies: Enemy[] = [];
   private readonly projectiles: CombatProjectile[] = [];
   private readonly enemyAttacks: EnemyAttackEvent[] = [];
+  private readonly enemySpawnIds = new Map<Enemy, string>();
+  private readonly enemyBySpawnId = new Map<string, Enemy>();
+  private readonly enemyPreviousPositions = new Map<Enemy, THREE.Vector3>();
+  private readonly enemyLeashRegions = new Map<Enemy, readonly RouteShape[]>();
+  private readonly enemyWakeAt = new Map<Enemy, number>();
   private readonly checkpoint = START_POSITION.clone();
+  private readonly previousPlayerPosition = START_POSITION.clone();
   private readonly aim2 = new THREE.Vector2();
   private readonly aimDirection = new THREE.Vector3(0, 0, -1);
   private readonly tempDirection = new THREE.Vector3();
@@ -130,9 +153,11 @@ export class Game {
   };
 
   private readonly landmarks: THREE.Group;
+  private characterProfile: CharacterProfile;
   private boss: Enemy;
+  private midpointBoss!: Enemy;
   private lockedTarget: Enemy | null = null;
-  private phase: GamePhase = 'exploration';
+  private phase: GamePhase = 'menu';
   private phaseBeforePause: Exclude<GamePhase, 'paused'> = 'exploration';
   private accumulator = 0;
   private elapsed = 0;
@@ -144,16 +169,34 @@ export class Game {
   private damageTaken = 0;
   private disposed = false;
 
-  constructor(private readonly canvas: HTMLCanvasElement) {
+  private readonly onFrontEndIntent = (event: Event): void => {
+    const detail = (event as CustomEvent<FrontEndIntentDetail>).detail;
+    if (!detail) return;
+    if (detail.type === 'preview' && detail.profile) {
+      this.applyCharacterProfile(detail.profile);
+    } else if (detail.type === 'start') {
+      this.beginPilgrimage(detail.profile ?? this.characterProfile);
+    } else if (detail.type === 'open-settings') {
+      this.hud.showSettingsFrom('none');
+    }
+  };
+
+  constructor(
+    private readonly canvas: HTMLCanvasElement,
+    initialProfile: CharacterProfile = DEFAULT_CHARACTER_PROFILE,
+  ) {
     this.renderer = createRenderer(canvas);
     this.renderer.toneMappingExposure = this.tuning.exposure;
     this.materials.setAnisotropy(Math.min(8, this.renderer.capabilities.getMaxAnisotropy()));
-    this.player.useAuthoredModel(createSorcererModel(this.materials));
+    this.characterProfile = sanitizeCharacterProfile(initialProfile);
+    this.player.useAuthoredModel(createSorcererModel(this.materials, appearanceFromProfile(this.characterProfile)));
+    this.applyCharacterProfile(this.characterProfile);
 
     const stick = this.getElement('#touch-stick');
     const knob = this.getElement('#touch-knob');
     const dashButton = this.getElement('#dash-button');
     this.input = new InputController(stick, knob, dashButton);
+    this.input.setEnabled(false);
     this.debugTools = new DebugTools(this.tuning, () => {
       this.renderer.toneMappingExposure = this.tuning.exposure;
       resizeRenderer(this.renderer, this.camera, this.tuning.maxDpr);
@@ -163,12 +206,13 @@ export class Game {
     this.createScene();
     this.createRelics();
     this.boss = this.createEnemies();
-    this.boss.useAuthoredModel(createEclipseArchonBoss(this.materials));
+    this.collision.configureRouteCollision(FIRMAMENT_ROUTE_WALKABLE, FIRMAMENT_ROUTE.gates, this.encounterDirector.getSnapshot().gates);
     this.player.restoreAt(START_POSITION);
     this.hud.setTarget(PROGRESSION_TARGET);
     this.cameraRig.setOcclusionRoots([this.world.foregroundLayer, this.world.midgroundLayer, this.world.farLayer]);
     this.cameraRig.snapTo(this.player.group.position);
     resizeRenderer(this.renderer, this.camera, this.tuning.maxDpr);
+    window.addEventListener('celestial-front-end-intent', this.onFrontEndIntent);
     this.installTestHooks();
     this.publishDiagnostics(true);
   }
@@ -181,6 +225,7 @@ export class Game {
     if (this.disposed) return;
     this.disposed = true;
     this.loop.stop();
+    window.removeEventListener('celestial-front-end-intent', this.onFrontEndIntent);
     this.input.dispose();
     this.audio.dispose();
     this.hud.dispose();
@@ -202,6 +247,12 @@ export class Game {
   private update(delta: number): void {
     this.frame += 1;
     resizeRenderer(this.renderer, this.camera, this.tuning.maxDpr);
+
+    if (this.phase === 'menu') {
+      this.updatePresentation(delta);
+      this.publishDiagnostics();
+      return;
+    }
 
     if (this.input.consume('pause') && this.phase !== 'dead' && this.phase !== 'victory') {
       if (this.phase === 'paused') {
@@ -227,7 +278,7 @@ export class Game {
     }
     if (this.phase === 'dead') {
       this.deathTimer += delta;
-      if (restartRequested || this.deathTimer >= 3.25) this.restartFromCheckpoint();
+      if (restartRequested) this.restartFromCheckpoint();
       this.updatePresentation(delta);
       this.publishDiagnostics();
       return;
@@ -249,11 +300,91 @@ export class Game {
     this.publishDiagnostics();
   }
 
+  private applyCharacterProfile(profile: CharacterProfile): void {
+    const next = sanitizeCharacterProfile(profile);
+    const appearanceChanged = appearanceSignature(next) !== appearanceSignature(this.characterProfile);
+    this.characterProfile = next;
+    this.player.setEquipment({
+      catalyst:
+        next.catalyst === 'crescent-staff'
+          ? 'Moon-etched crescent staff'
+          : next.catalyst === 'ash-wand'
+            ? 'Moon-ash orb wand'
+            : 'Unbound celestial hands',
+      armor: `${next.robeDye[0].toUpperCase()}${next.robeDye.slice(1)} starweave robes`,
+    });
+    if (!appearanceChanged) return;
+    this.player.useAuthoredModel(createSorcererModel(this.materials, appearanceFromProfile(next)));
+  }
+
+  private beginPilgrimage(profile: CharacterProfile): void {
+    this.applyCharacterProfile(profile);
+    this.restartFullRun();
+    this.input.setEnabled(true);
+    this.hud.showMenu('none');
+    this.cameraRig.snapTo(this.player.group.position);
+    this.emitAudio('confirm', 0.8);
+  }
+
+  private onEncounterActivated(encounterId: string): void {
+    const encounter = FIRMAMENT_ROUTE.encounters.find((candidate) => candidate.id === encounterId);
+    if (!encounter) return;
+    this.syncRouteState();
+    for (const spawn of encounter.spawns) {
+      const enemy = this.enemyBySpawnId.get(spawn.id);
+      if (!enemy) continue;
+      const delay = 'wakeDelaySeconds' in spawn ? Math.max(0, spawn.wakeDelaySeconds ?? 0) : 0;
+      if (delay > 0) this.enemyWakeAt.set(enemy, this.elapsed + delay);
+      else enemy.awaken();
+    }
+    if (encounter.boss !== 'none') {
+      this.phase = 'boss';
+      this.vfx.emitCelestialRestoration(
+        new THREE.Vector3(encounter.activation.center[0], 0, encounter.activation.center[1]),
+        encounter.boss === 'final' ? 2.4 : 1.75,
+      );
+      this.cameraRig.kick(0.24, 0.45);
+      this.emitAudio('boss-awaken', encounter.boss === 'final' ? 1 : 0.82);
+    }
+    this.hud.showDiscovery({
+      id: `encounter-${encounter.id}`,
+      visible: true,
+      kicker: encounter.boss === 'none' ? 'The pilgrimage narrows' : 'Celestial adversary',
+      title: encounter.name,
+      detail: encounter.objective,
+      duration: encounter.boss === 'none' ? 1500 : 2200,
+    });
+  }
+
+  private syncRouteState(): void {
+    const snapshot = this.encounterDirector.getSnapshot();
+    this.collision.syncGateStates(snapshot.gates);
+    this.world.setGateStates(snapshot.gates);
+  }
+
+  private getActiveBoss(): Enemy | null {
+    const activeEncounter = this.encounterDirector.activeEncounter;
+    if (!activeEncounter || activeEncounter.boss === 'none') return null;
+    const bossSpawn = activeEncounter.spawns.find((spawn) => spawn.role === 'boss');
+    return bossSpawn ? this.enemyBySpawnId.get(bossSpawn.id) ?? null : null;
+  }
+
   private fixedUpdate(delta: number): void {
     this.collision.beginStep();
     const wasDodging = this.player.isDodging;
+    this.previousPlayerPosition.copy(this.player.group.position);
     this.player.update(delta, this.elapsed, this.input, this.tuning, ARENA);
-    this.collision.resolveWorld(this.player.group.position, this.player.velocity, this.player.radius, ARENA, OBSTACLES);
+    this.collision.resolveRouteMovement(
+      this.previousPlayerPosition,
+      this.player.group.position,
+      this.player.velocity,
+      this.player.radius,
+    );
+    const activatedEncounterId = this.encounterDirector.activateNextEncounterAt(
+      [this.player.group.position.x, this.player.group.position.z],
+      this.player.radius,
+    );
+    if (activatedEncounterId) this.onEncounterActivated(activatedEncounterId);
     if (!wasDodging && this.player.isDodging) {
       this.vfx.emitDodge(this.player.group.position, this.player.velocity, 1.1);
       this.emitAudio('dodge', 0.7);
@@ -261,16 +392,50 @@ export class Game {
 
     this.updateTargeting();
     this.handlePlayerActions();
+    if (this.phase === 'victory') return;
     this.enemyAttacks.length = 0;
     for (const enemy of this.enemies) {
-      enemy.update(delta, this.elapsed, this.player.group.position, true, this.enemyAttacks);
+      const previous = this.enemyPreviousPositions.get(enemy) ?? enemy.group.position.clone();
+      previous.copy(enemy.group.position);
+      const spawnId = this.enemySpawnIds.get(enemy);
+      const enabled = spawnId ? this.encounterDirector.isEnemyEnabled(spawnId) : false;
+      const leashRegions = this.enemyLeashRegions.get(enemy) ?? FIRMAMENT_ROUTE_WALKABLE;
+      const playerInLeash = this.collision.containsInWalkableUnion(
+        this.player.group.position,
+        this.player.radius * 0.2,
+        leashRegions,
+      );
+      if (enabled && enemy.dormant && this.elapsed >= (this.enemyWakeAt.get(enemy) ?? -Infinity)) {
+        this.enemyWakeAt.delete(enemy);
+        enemy.awaken();
+      }
+      enemy.update(
+        delta,
+        this.elapsed,
+        playerInLeash ? this.player.group.position : enemy.spawnPosition,
+        enabled,
+        this.enemyAttacks,
+        playerInLeash,
+      );
       if (enemy.active && !enemy.dormant) {
-        this.collision.resolveWorld(enemy.group.position, enemy.velocity, enemy.radius, ARENA, OBSTACLES);
+        this.collision.resolveRouteMovement(previous, enemy.group.position, enemy.velocity, enemy.radius, leashRegions);
       }
     }
     this.separateEnemies();
+    for (const enemy of this.enemies) {
+      if (!enemy.active || enemy.dormant) continue;
+      const previous = this.enemyPreviousPositions.get(enemy) ?? enemy.group.position;
+      this.collision.resolveRouteMovement(
+        previous,
+        enemy.group.position,
+        enemy.velocity,
+        enemy.radius,
+        this.enemyLeashRegions.get(enemy) ?? FIRMAMENT_ROUTE_WALKABLE,
+      );
+    }
     for (const attack of this.enemyAttacks) this.resolveEnemyAttack(attack);
     this.updateProjectiles(delta);
+    if (this.isVictoryPhase()) return;
     this.updateRelics(delta);
 
     if (this.player.dead && this.phase !== 'dead') {
@@ -286,8 +451,17 @@ export class Game {
     const restoration = (this.restoredCount + (this.phase === 'victory' ? 1 : 0)) / PROGRESSION_TARGET;
     this.world.update(delta, this.elapsed, restoration);
     this.vfx.update(delta, this.elapsed);
-    const cameraTarget = this.lockedTarget?.active ? this.lockedTarget.group.position : this.phase === 'boss' && this.boss.active ? this.boss.group.position : null;
-    this.cameraRig.update(delta, this.player.group.position, this.tuning.cameraLag, cameraTarget);
+    const activeBoss = this.getActiveBoss();
+    const cameraTarget = this.lockedTarget?.active
+      ? this.lockedTarget.group.position
+      : this.phase === 'boss' && activeBoss?.active
+        ? activeBoss.group.position
+        : null;
+    const section = this.findCurrentSection();
+    const routeForward = section
+      ? this.tempDirection.set(section.cameraForward[0], 0, section.cameraForward[1]).normalize()
+      : null;
+    this.cameraRig.update(delta, this.player.group.position, this.tuning.cameraLag, cameraTarget, routeForward);
     const score = this.restoredCount + (this.phase === 'victory' ? 1 : 0);
     this.hud.update(score, PROGRESSION_TARGET, this.elapsed, this.phase === 'victory');
   }
@@ -412,13 +586,13 @@ export class Game {
         ? new THREE.Vector3(Math.sin(angle), 0, Math.cos(angle))
         : attack.direction.clone().applyAxisAngle(THREE.Object3D.DEFAULT_UP, angle);
       const origin = attack.source.group.position.clone().addScaledVector(direction, attack.source.radius + 0.28);
-      origin.y = attack.source.kind === 'boss' ? 1.25 : 0.78;
+       origin.y = attack.source.isBoss ? 1.25 : 0.78;
       const projectile = new CombatProjectile(
         'enemy',
-        attack.source.kind === 'boss' ? 'eclipse' : 'star',
+         attack.source.isBoss ? 'eclipse' : 'star',
         origin,
         direction,
-        attack.source.kind === 'boss' ? 9.5 : 7.8,
+         attack.source.isBoss ? 9.5 : 7.8,
         attack.damage,
         attack.radius,
         4.2,
@@ -426,13 +600,21 @@ export class Game {
       this.projectiles.push(projectile);
       this.scene.add(projectile.group);
     }
-    this.emitAudio(attack.source.kind === 'boss' ? 'boss-cast' : 'enemy-cast', 0.55);
+     this.emitAudio(attack.source.isBoss ? 'boss-cast' : 'enemy-cast', 0.55);
   }
 
   private updateProjectiles(delta: number): void {
     for (let index = this.projectiles.length - 1; index >= 0; index -= 1) {
       const projectile = this.projectiles[index];
       projectile.update(delta, this.elapsed);
+      if (
+        projectile.active &&
+        (this.collision.sweepClosedGates(projectile.previousPosition, projectile.group.position, projectile.radius) ||
+          !this.collision.containsInWalkableUnion(projectile.group.position, 0))
+      ) {
+        this.vfx.emitHit(projectile.group.position, projectile.velocity, 0.65);
+        projectile.deactivate();
+      }
       if (projectile.active && projectile.faction === 'player') {
         for (const enemy of this.enemies) {
           if (!enemy.active || enemy.dormant) continue;
@@ -468,15 +650,41 @@ export class Game {
     this.vfx.emitHit(enemy.group.position, this.player.facing, Math.min(1.7, amount / 22));
     this.emitAudio('enemy-hit', Math.min(1, amount / 32));
     if (!killed) return;
+    this.enemyWakeAt.delete(enemy);
     this.defeatedEnemies += 1;
-    this.vfx.emitDeath(enemy.group.position, enemy.kind === 'boss' ? 2.6 : 1);
+    this.vfx.emitDeath(enemy.group.position, enemy.isBoss ? 2.6 : 1);
     if (source === 'melee') {
       this.affinity.wrathful = Math.min(1, this.affinity.wrathful + 0.045);
       this.affinity.celestial = Math.max(0, this.affinity.celestial - 0.008);
     } else {
       this.affinity.celestial = Math.min(1, this.affinity.celestial + 0.028);
     }
-    if (enemy.kind === 'boss') this.completeVictory();
+    const spawnId = this.enemySpawnIds.get(enemy);
+    const defeat = spawnId ? this.encounterDirector.markEnemyDefeated(spawnId) : null;
+    if (defeat?.encounterCompleted) {
+      if (enemy === this.midpointBoss) this.encounterDirector.commitProgressBoundary();
+      this.syncRouteState();
+      if (enemy === this.boss) {
+        this.completeVictory();
+      } else {
+        this.phase = 'exploration';
+        if (enemy === this.midpointBoss) {
+          this.player.addCharm('Castellan\'s Broken Orrery');
+          this.player.heal(48);
+          this.comprehension.lunar.challengeRank = Math.max(3, this.comprehension.lunar.challengeRank);
+          this.refreshComprehension('lunar');
+        }
+        this.hud.showDiscovery({
+          id: `encounter-cleared-${spawnId}`,
+          visible: true,
+          kicker: enemy.isBoss ? 'Warden defeated' : 'Path unsealed',
+          title: enemy.isBoss ? `${enemy.displayName} is broken` : 'The blackstone seal releases',
+          detail: this.encounterDirector.objective,
+          duration: enemy.isBoss ? 2200 : 1500,
+        });
+        this.emitAudio('checkpoint', enemy.isBoss ? 1 : 0.72);
+      }
+    }
   }
 
   private damagePlayer(amount: number, force = false): boolean {
@@ -506,6 +714,8 @@ export class Game {
 
   private restoreRelic(relic: CelestialRelic): void {
     if (!relic.restore()) return;
+    const checkpointId = this.relicCheckpointIds.get(relic);
+    if (checkpointId) this.encounterDirector.activateCheckpoint(checkpointId);
     this.restoredCount += 1;
     this.checkpoint.copy(relic.position).add(new THREE.Vector3(0, 0.02, 2.6));
     this.player.heal(this.player.maxHealth);
@@ -532,21 +742,48 @@ export class Game {
     this.audio.pickup(relic.index + 2);
     this.hud.flashPickup();
     this.emitAudio('checkpoint', 1);
-    if (this.restoredCount >= this.relics.length) this.awakenBoss();
+    this.syncRouteState();
   }
 
   private awakenBoss(): void {
-    if (!this.boss.dormant || !this.boss.active) return;
-    this.boss.awaken();
-    this.phase = 'boss';
-    this.checkpoint.set(0, 0.02, -15.5);
-    this.vfx.emitCelestialRestoration(this.boss.group.position, 2.4);
-    this.cameraRig.kick(0.28, 0.5);
-    this.emitAudio('boss-awaken', 1);
+    while (this.encounterDirector.nextEncounter && this.encounterDirector.nextEncounter.boss !== 'final') {
+      const encounter = this.encounterDirector.nextEncounter;
+      this.forceCompleteEncounter(encounter.id);
+      const checkpoint = FIRMAMENT_ROUTE.checkpoints.find((candidate) => candidate.unlocksAfterEncounterId === encounter.id);
+      if (checkpoint) {
+        const relic = this.relics[FIRMAMENT_ROUTE.checkpoints.indexOf(checkpoint)];
+        if (relic && relic.state !== 'restored') {
+          relic.setReady();
+          this.restoreRelic(relic);
+        }
+      }
+    }
+    const finalEncounter = this.encounterDirector.nextEncounter;
+    if (!finalEncounter || finalEncounter.boss !== 'final') return;
+    if (!this.boss.active) this.boss.reset();
+    if (this.encounterDirector.activateEncounter(finalEncounter.id)) this.onEncounterActivated(finalEncounter.id);
+  }
+
+  private forceCompleteEncounter(encounterId: string): void {
+    const encounter = FIRMAMENT_ROUTE.encounters.find((candidate) => candidate.id === encounterId);
+    if (!encounter || this.encounterDirector.nextEncounter?.id !== encounterId) return;
+    this.encounterDirector.activateEncounter(encounterId);
+    for (const spawn of encounter.spawns) {
+      const enemy = this.enemyBySpawnId.get(spawn.id);
+      if (!enemy) continue;
+      enemy.reset();
+      enemy.awaken();
+      enemy.takeDamage(enemy.maxHealth + 1);
+    }
+    this.encounterDirector.completeEncounter(encounterId);
+    this.syncRouteState();
   }
 
   private completeVictory(): void {
     this.phase = 'victory';
+    for (const projectile of this.projectiles) {
+      if (projectile.faction === 'enemy') projectile.deactivate();
+    }
     this.lockedTarget = null;
     this.player.setLockVisible(false);
     this.comprehension.lunar.challengeRank = Math.max(4, this.comprehension.lunar.challengeRank);
@@ -561,16 +798,23 @@ export class Game {
     this.emitAudio('victory', 1);
   }
 
+  private isVictoryPhase(): boolean {
+    return this.phase === 'victory';
+  }
+
   private restartFromCheckpoint(): void {
     this.clearProjectiles();
-    this.player.restoreAt(this.checkpoint);
-    if (this.restoredCount >= this.relics.length && this.boss.active) {
-      this.boss.reset();
-      this.boss.awaken();
-      this.phase = 'boss';
+    this.encounterDirector.restoreLastCheckpoint();
+    this.syncRouteState();
+    this.resetEnemiesForRouteState();
+    const routeCheckpoint = this.encounterDirector.currentCheckpoint;
+    if (routeCheckpoint) {
+      this.checkpoint.set(routeCheckpoint.position[0], 0.02, routeCheckpoint.position[1] + 2.4);
     } else {
-      this.phase = 'exploration';
+      this.checkpoint.copy(START_POSITION);
     }
+    this.player.restoreAt(this.checkpoint);
+    this.phase = 'exploration';
     this.deathTimer = 0;
     this.accumulator = 0;
     this.lockedTarget = null;
@@ -581,8 +825,10 @@ export class Game {
 
   private restartFullRun(): void {
     this.clearProjectiles();
+    this.encounterDirector.reset();
+    this.syncRouteState();
     for (const relic of this.relics) relic.reset();
-    for (const enemy of this.enemies) enemy.reset();
+    this.resetEnemiesForRouteState();
     this.restoredCount = 0;
     this.defeatedEnemies = 0;
     this.damageDealt = 0;
@@ -604,9 +850,26 @@ export class Game {
     this.player.setFocusRegenMultiplier(1);
     this.player.restoreAt(START_POSITION);
     this.phase = 'exploration';
+    this.input.setEnabled(true);
     this.lockedTarget = null;
     this.player.setLockVisible(false);
     this.cameraRig.snapTo(this.player.group.position);
+  }
+
+  private resetEnemiesForRouteState(): void {
+    this.enemyWakeAt.clear();
+    for (const enemy of this.enemies) {
+      enemy.reset();
+      const encounterId = enemy.encounterId;
+      if (!encounterId) continue;
+      const state = this.encounterDirector.getEncounterState(encounterId);
+      if (state === 'cleared') {
+        enemy.awaken();
+        enemy.takeDamage(enemy.maxHealth + 1);
+      } else if (state === 'active') {
+        enemy.awaken();
+      }
+    }
   }
 
   private recordSpellUse(spell: 'lunar' | 'aurora'): ComprehensionTrack {
@@ -697,34 +960,66 @@ export class Game {
       const relic = new CelestialRelic(index, data.kind, new THREE.Vector3(data.position[0], 0, data.position[1]));
       if (data.kind === 'moon') relic.useAuthoredModel(createMoonwellRelic(this.materials));
       else if (data.kind === 'aurora') relic.useAuthoredModel(createCelestialAstrolabe(this.materials));
+      else relic.useAuthoredModel(createConstellationReliquary(this.materials));
       this.relics.push(relic);
+      this.relicCheckpointIds.set(relic, data.checkpointId);
       this.scene.add(relic.group);
     });
   }
 
   private createEnemies(): Enemy {
     let id = 0;
-    const spawn = (kind: EnemyKind, x: number, z: number, guardRelic?: number): Enemy => {
-      const enemy = new Enemy({ id: id++, kind, position: new THREE.Vector3(x, 0, z), guardRelic });
-      this.enemies.push(enemy);
-      this.scene.add(enemy.group);
-      return enemy;
-    };
+    const guardedRelicByEncounter = new Map<string, number>(
+      FIRMAMENT_ROUTE.checkpoints.map((checkpoint, index) => [checkpoint.unlocksAfterEncounterId, index] as const),
+    );
+    let finalBoss: Enemy | null = null;
 
-    spawn('wisp', -25, 5, 0);
-    spawn('wisp', -18.5, 10.5, 0);
-    spawn('sentinel', -22, 12, 0);
-    spawn('sentinel', 18, 3, 1);
-    spawn('sentinel', 23.5, 8, 1);
-    spawn('seer', 21, 1, 1);
-    spawn('wisp', -4.5, -10.5, 2);
-    spawn('sentinel', 3.8, -9.5, 2);
-    spawn('seer', 0, -15.5, 2);
-    spawn('wisp', -10, 18);
-    spawn('seer', 12, 14);
-    spawn('sentinel', -12, -18);
-    const boss = spawn('boss', BOSS_POSITION.x, BOSS_POSITION.z);
-    return boss;
+    for (const encounter of FIRMAMENT_ROUTE.encounters) {
+      for (const spawn of encounter.spawns) {
+        const enemy = new Enemy({
+          id: id++,
+          kind: spawn.kind,
+          position: new THREE.Vector3(spawn.position[0], 0, spawn.position[1]),
+          guardRelic: guardedRelicByEncounter.get(encounter.id),
+          encounterId: encounter.id,
+          initiallyDormant: true,
+          buildPlaceholderModel: false,
+        });
+        enemy.group.rotation.y = spawn.facingRadians;
+        enemy.useAuthoredModel(
+          spawn.kind === 'eclipseArchon'
+            ? createEclipseArchonBoss(this.materials)
+            : createEnemyModel(spawn.kind, this.materials),
+        );
+        if (enemy.isBoss) {
+          const encounterLight = new THREE.PointLight(
+            spawn.kind === 'eclipseArchon' ? '#ff5b9b' : '#f3bd66',
+            spawn.kind === 'eclipseArchon' ? 5.2 : 4.4,
+            spawn.kind === 'eclipseArchon' ? 12 : 9,
+            2,
+          );
+          encounterLight.name = `${spawn.id}.portraitLight`;
+          encounterLight.position.set(0, 3.2, 1.6);
+          enemy.group.add(encounterLight);
+        }
+        this.enemies.push(enemy);
+        this.enemySpawnIds.set(enemy, spawn.id);
+        this.enemyBySpawnId.set(spawn.id, enemy);
+        this.enemyPreviousPositions.set(enemy, enemy.group.position.clone());
+        const leashRegions: RouteShape[] = [];
+        for (const sectionId of spawn.leashSectionIds) {
+          const section = FIRMAMENT_ROUTE.sections.find((candidate) => candidate.id === sectionId);
+          if (section) leashRegions.push(...(section.walkable as readonly RouteShape[]));
+        }
+        this.enemyLeashRegions.set(enemy, leashRegions.length > 0 ? leashRegions : FIRMAMENT_ROUTE_WALKABLE);
+        this.scene.add(enemy.group);
+        if (spawn.kind === 'orreryCastellan') this.midpointBoss = enemy;
+        if (spawn.kind === 'eclipseArchon') finalBoss = enemy;
+      }
+    }
+
+    if (!finalBoss || !this.midpointBoss) throw new Error('The campaign requires both midpoint and final bosses.');
+    return finalBoss;
   }
 
   private createLandmarks(): THREE.Group {
@@ -767,19 +1062,31 @@ export class Game {
   }
 
   private getCurrentObjective(): string {
+    if (this.phase === 'menu') return 'Choose the pilgrim who will restore the sky';
     if (this.phase === 'dead') return 'Fallen — returning to the last restored body';
     if (this.phase === 'victory') return 'The Eclipse Archon is defeated; the firmament remembers';
-    if (this.phase === 'boss') return `Defeat the Eclipse Archon — phase ${this.boss.phase}`;
-    const relic = this.relics.find((candidate) => candidate.state !== 'restored');
-    if (!relic) return 'Approach the eclipse seal';
-    const guards = this.enemies.filter((enemy) => enemy.guardRelic === relic.index && enemy.active).length;
-    return guards > 0
-      ? `Break ${guards} ${relic.kind} ward${guards === 1 ? '' : 's'}`
-      : `Claim the restored ${relic.kind} body`;
+    const activeBoss = this.getActiveBoss();
+    if (this.phase === 'boss' && activeBoss) return `Defeat ${activeBoss.displayName} — phase ${activeBoss.phase}`;
+    const readyRelic = this.relics.find((candidate) => candidate.state === 'ready');
+    if (readyRelic) return `Claim the restored ${readyRelic.kind} body`;
+    return this.encounterDirector.objective;
+  }
+
+  private findCurrentSection(): RouteSectionDefinition | null {
+    const position = this.player.group.position;
+    return (
+      FIRMAMENT_ROUTE.sections.find((section) =>
+        this.collision.containsInWalkableUnion(position, this.player.radius * 0.25, section.walkable),
+      ) ?? null
+    );
   }
 
   private publishDiagnostics(forceEvent = false): void {
-    const activeByKind = (kind: EnemyKind): number => this.enemies.filter((enemy) => enemy.kind === kind && enemy.active).length;
+    if (!forceEvent && this.frame % 6 !== 0) return;
+    const activeByKind = (kind: RouteEnemyKind): number =>
+      this.enemies.filter((enemy) => enemy.kind === kind && enemy.active && !enemy.dormant).length;
+    const activeBoss = this.getActiveBoss();
+    const routeSnapshot = this.encounterDirector.getSnapshot();
     const info = this.renderer.info;
     const snapshot = {
       frame: this.frame,
@@ -791,6 +1098,11 @@ export class Game {
       paused: this.phase === 'paused',
       dead: this.phase === 'dead',
       victory: this.phase === 'victory',
+      app: {
+        screen: this.phase === 'menu' ? 'main-menu' : 'game',
+        inputEnabled: this.phase !== 'menu',
+      },
+      character: { ...this.characterProfile },
       objective: this.getCurrentObjective(),
       restorationCount: this.restoredCount,
       restoredBodies: this.relics.filter((relic) => relic.state === 'restored').map((relic) => relic.kind),
@@ -811,20 +1123,27 @@ export class Game {
         dodging: this.player.isDodging,
       },
       enemies: {
-        active: this.enemies.filter((enemy) => enemy.active && enemy.kind !== 'boss').length,
+        active: this.enemies.filter((enemy) => enemy.active && !enemy.dormant && !enemy.isBoss).length,
         defeated: this.defeatedEnemies,
         byType: {
           wisp: activeByKind('wisp'),
           sentinel: activeByKind('sentinel'),
           seer: activeByKind('seer'),
+          ashenInitiate: activeByKind('ashenInitiate'),
+          astralLancer: activeByKind('astralLancer'),
+          eclipseChorister: activeByKind('eclipseChorister'),
+          orreryCastellan: activeByKind('orreryCastellan'),
+          eclipseArchon: activeByKind('eclipseArchon'),
         },
       },
       boss: {
-        spawned: !this.boss.dormant,
-        active: this.boss.active && !this.boss.dormant,
-        health: this.boss.health,
-        maxHealth: this.boss.maxHealth,
-        phase: this.boss.phase,
+        spawned: Boolean(activeBoss && !activeBoss.dormant),
+        active: Boolean(activeBoss?.active && !activeBoss.dormant),
+        health: activeBoss?.health ?? 0,
+        maxHealth: activeBoss?.maxHealth ?? 0,
+        phase: activeBoss?.phase ?? 1,
+        name: activeBoss?.displayName ?? '',
+        epithet: activeBoss?.epithet ?? '',
       },
       progression: {
         restored: this.restoredCount,
@@ -844,10 +1163,22 @@ export class Game {
         lockedTarget: this.lockedTarget?.id ?? null,
         activeCollisions: this.collision.activeContacts,
       },
+      route: {
+        activeEncounterId: routeSnapshot.activeEncounterId,
+        nextEncounterId: routeSnapshot.nextEncounterId,
+        currentCheckpointId: routeSnapshot.currentCheckpointId,
+        completedEncounterIds: [...routeSnapshot.completedEncounterIds],
+        gateStates: Object.fromEntries(routeSnapshot.gates.map((gate) => [gate.id, gate.state])),
+        campaignComplete: routeSnapshot.campaignComplete,
+        currentSectionId: this.findCurrentSection()?.id ?? FIRMAMENT_ROUTE.start.sectionId,
+      },
       simulation: {
         engine: 'deterministic-custom-circles',
         fixedStep: FIXED_STEP,
-        colliderCount: OBSTACLES.length + this.enemies.filter((enemy) => enemy.active).length + 1,
+        colliderCount: this.collision.routeRegionCount + this.collision.dynamicGateCount + this.enemies.filter((enemy) => enemy.active).length + 1,
+        walkableRegionCount: this.collision.routeRegionCount,
+        dynamicGateCount: this.collision.dynamicGateCount,
+        closedGateCount: this.collision.closedGateCount,
         ccdProjectiles: this.projectiles.length,
       },
       vfx: this.vfx.getStats(),
@@ -866,9 +1197,7 @@ export class Game {
       },
     };
     (window as RuntimeWindow).__THREE_GAME_DIAGNOSTICS__ = snapshot;
-    if (forceEvent || this.frame % 6 === 0) {
-      window.dispatchEvent(new CustomEvent('celestial-game-state', { detail: snapshot }));
-    }
+    window.dispatchEvent(new CustomEvent('celestial-game-state', { detail: snapshot }));
   }
 
   private installTestHooks(): void {
@@ -882,23 +1211,112 @@ export class Game {
       restoreNextBody: () => {
         const relic = this.relics.find((candidate) => candidate.state !== 'restored');
         if (!relic) return;
+        const checkpoint = FIRMAMENT_ROUTE.checkpoints[relic.index];
+        const unlockEncounter = checkpoint
+          ? FIRMAMENT_ROUTE.encounters.find((encounter) => encounter.id === checkpoint.unlocksAfterEncounterId)
+          : null;
+        while (
+          unlockEncounter &&
+          this.encounterDirector.nextEncounter &&
+          this.encounterDirector.nextEncounter.order <= unlockEncounter.order
+        ) {
+          this.forceCompleteEncounter(this.encounterDirector.nextEncounter.id);
+        }
         relic.setReady();
         this.restoreRelic(relic);
+        if (this.restoredCount === this.relics.length) this.awakenBoss();
+        this.publishDiagnostics(true);
       },
-      spawnBoss: () => {
-        for (const relic of this.relics) {
-          if (relic.state === 'restored') continue;
-          relic.setReady();
-          this.restoreRelic(relic);
-        }
-        this.awakenBoss();
-      },
+      spawnBoss: () => this.awakenBoss(),
       defeatBoss: () => {
         if (this.boss.dormant) this.awakenBoss();
         this.damageEnemy(this.boss, this.boss.health + 1, 'lunar');
       },
       restart: () => this.restartFullRun(),
+      activateNextEncounter: () => {
+        const encounter = this.encounterDirector.nextEncounter;
+        if (!encounter || !this.encounterDirector.activateEncounter(encounter.id)) return;
+        this.placePlayerForEncounter(encounter);
+        this.onEncounterActivated(encounter.id);
+        this.publishDiagnostics(true);
+      },
+      defeatActiveEncounter: () => {
+        const encounter = this.encounterDirector.activeEncounter;
+        if (!encounter) return;
+        for (const spawn of encounter.spawns) {
+          const enemy = this.enemyBySpawnId.get(spawn.id);
+          if (!enemy?.active) continue;
+          if (enemy.dormant) {
+            this.enemyWakeAt.delete(enemy);
+            enemy.awaken();
+          }
+          this.damageEnemy(enemy, enemy.health + 1, 'lunar');
+        }
+        this.publishDiagnostics(true);
+      },
+      claimAvailableCheckpoint: () => {
+        const snapshot = this.encounterDirector.getSnapshot();
+        const availableIndex = snapshot.checkpoints.findIndex((checkpoint) => checkpoint.state === 'available');
+        if (availableIndex < 0) return;
+        const relic = this.relics[availableIndex];
+        if (!relic) return;
+        relic.setReady();
+        this.restoreRelic(relic);
+        this.publishDiagnostics(true);
+      },
+      showEncounter: (encounterId) => {
+        const target = FIRMAMENT_ROUTE.encounters.find((encounter) => encounter.id === encounterId);
+        if (!target) return;
+        while (this.encounterDirector.nextEncounter && this.encounterDirector.nextEncounter.order < target.order) {
+          const prior = this.encounterDirector.nextEncounter;
+          this.forceCompleteEncounter(prior.id);
+          const checkpointIndex = FIRMAMENT_ROUTE.checkpoints.findIndex(
+            (checkpoint) => checkpoint.unlocksAfterEncounterId === prior.id,
+          );
+          const relic = this.relics[checkpointIndex];
+          if (relic && relic.state !== 'restored') {
+            relic.setReady();
+            this.restoreRelic(relic);
+          }
+        }
+        if (this.encounterDirector.nextEncounter?.id === target.id && this.encounterDirector.activateEncounter(target.id)) {
+          this.placePlayerForEncounter(target);
+          this.onEncounterActivated(target.id);
+        }
+        this.publishDiagnostics(true);
+      },
+      showSection: (sectionId) => {
+        const section = FIRMAMENT_ROUTE.sections.find((candidate) => candidate.id === sectionId);
+        const shape = section?.walkable[0];
+        if (!section || !shape) return;
+        const position = new THREE.Vector3(shape.center[0], 0.02, shape.center[1]);
+        this.player.restoreAt(position);
+        this.player.setFacing(new THREE.Vector3(section.cameraForward[0], 0, section.cameraForward[1]));
+        this.cameraRig.snapTo(position);
+        this.publishDiagnostics(true);
+      },
+      victoryTrade: () => {
+        if (this.boss.dormant) this.awakenBoss();
+        this.damagePlayer(this.player.health + 1, true);
+        this.damageEnemy(this.boss, this.boss.health + 1, 'lunar');
+        this.publishDiagnostics(true);
+      },
     };
+  }
+
+  private placePlayerForEncounter(encounter: EncounterDefinition): void {
+    const section = FIRMAMENT_ROUTE.sections.find((candidate) => candidate.id === encounter.sectionIds[0]);
+    const forward = new THREE.Vector3(
+      section?.cameraForward[0] ?? 0,
+      0,
+      section?.cameraForward[1] ?? -1,
+    ).normalize();
+    const distance = encounter.boss === 'none' ? 1.8 : 4.5;
+    const position = new THREE.Vector3(encounter.activation.center[0], 0.02, encounter.activation.center[1])
+      .addScaledVector(forward, -distance);
+    this.player.restoreAt(position);
+    this.player.setFacing(forward);
+    this.cameraRig.snapTo(position);
   }
 
   private emitAudio(name: string, intensity = 1): void {
