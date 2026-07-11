@@ -103,7 +103,9 @@ async function main() {
   await page.waitForSelector('canvas', { state: 'visible', timeout: 10_000 });
   const enter = page.locator('#enter-game');
   if (await enter.isVisible().catch(() => false)) {
-    await enter.click();
+    // The game hides the title veil immediately on activation, which can race
+    // Playwright's pointer-actionability checks on slower remote deployments.
+    await enter.evaluate((element) => element.click());
     await page.locator('#title-veil').waitFor({ state: 'hidden', timeout: 2_000 }).catch(() => undefined);
   }
   if (args.state === 'boundary') {
