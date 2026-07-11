@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#05080a" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>The Last Firmament</title>
+  </head>
+  <body>
+    <main id="app">
+      <canvas id="game-canvas" aria-label="The Last Firmament playable game world"></canvas>
+      <div class="world-vignette" aria-hidden="true"></div>
+
+      <section id="title-veil" class="title-veil" aria-label="The Last Firmament">
+        <div class="title-veil__sigil" aria-hidden="true">
+          <span></span><span></span><i></i>
+        </div>
+        <p class="eyebrow">A celestial pilgrimage</p>
+        <h1>The Last <span>Firmament</span></h1>
+        <p class="title-veil__lore">The heavens remember those who seek them.</p>
+        <button id="enter-game" class="rune-button rune-button--primary" type="button" data-ui-action="enter" data-ui-sound="confirm">
+          <span>Cross the threshold</span>
+          <small>Press any key</small>
+        </button>
+      </section>
+
+      <section id="hud" aria-live="polite" aria-label="Game status">
+        <div class="vitals-cluster hud-surface">
+          <div class="vitals-crest" aria-hidden="true"><span>☾</span></div>
+          <div class="vitals-bars">
+            <div class="meter meter--vitality" id="vitality-meter" style="--meter-value: 1">
+              <div class="meter__heading"><span>Vitality</span><output id="vitality-value">100</output></div>
+              <div class="meter__track"><i></i></div>
+            </div>
+            <div class="meter meter--focus" id="focus-meter" style="--meter-value: 1">
+              <div class="meter__heading"><span>Focus</span><output id="focus-value">80</output></div>
+              <div class="meter__track"><i></i></div>
+            </div>
+            <div class="meter meter--stamina" id="stamina-meter" style="--meter-value: 1">
+              <div class="meter__heading"><span>Stamina</span><output id="stamina-value">100</output></div>
+              <div class="meter__track"><i></i></div>
+            </div>
+          </div>
+        </div>
+
+        <aside class="objective-cluster hud-surface" aria-label="Celestial objective">
+          <div class="objective-cluster__mark" aria-hidden="true"><i></i><span>✦</span></div>
+          <div class="objective-cluster__copy">
+            <p class="eyebrow" id="objective-kicker">Celestial objective</p>
+            <strong id="objective-title">Recover the absent stars</strong>
+            <div class="objective-progress">
+              <span id="status-line">Celestial echoes found</span>
+              <b><span id="score-value">0</span><em>/</em><span id="target-value">8</span></b>
+            </div>
+          </div>
+          <time id="timer-value" datetime="PT0S">00:00</time>
+        </aside>
+
+        <div class="system-actions" aria-label="System controls">
+          <button id="audio-toggle" class="icon-button" type="button" data-audio-toggle data-ui-sound="confirm" aria-label="Mute sound" aria-pressed="false">
+            <span data-audio-icon aria-hidden="true">◖</span>
+          </button>
+          <button id="settings-button" class="icon-button" type="button" data-game-intent="pause" data-ui-action="settings" aria-label="Open settings">
+            <span aria-hidden="true">⚙</span>
+          </button>
+          <button id="pause-button" class="icon-button" type="button" data-game-intent="pause" data-ui-action="pause" aria-label="Pause game">
+            <span aria-hidden="true">Ⅱ</span>
+          </button>
+        </div>
+
+        <section id="boss-hud" class="boss-hud" aria-label="Boss vitality" hidden>
+          <div class="boss-hud__heading"><span id="boss-epithet">Warden of the Hollow Orbit</span><b id="boss-phase">I</b></div>
+          <strong id="boss-name">The Starved Astronomer</strong>
+          <div id="boss-meter" class="boss-hud__track" style="--meter-value: 1"><i></i><span></span></div>
+        </section>
+
+        <aside class="affinity-cluster hud-surface" aria-label="Behavioral affinity">
+          <div class="affinity-cluster__glyph" id="affinity-glyph" aria-hidden="true">♢</div>
+          <div>
+            <p class="eyebrow">Affinity</p>
+            <strong id="affinity-name">Unwritten</strong>
+            <span id="affinity-detail">Your deeds have yet to mark the sky</span>
+          </div>
+          <output id="affinity-value">±0</output>
+        </aside>
+
+        <section class="spell-belt" aria-label="Equipped sorceries">
+          <div class="comprehension-seal">
+            <span>Comprehension</span>
+            <strong id="comprehension-tier">Novice</strong>
+            <i id="comprehension-progress" style="--meter-value: 0.12"></i>
+          </div>
+          <ol id="spell-slots">
+            <li class="spell-slot is-active" data-spell-slot="0" style="--slot-charge: 1">
+              <kbd>Q</kbd><span class="spell-slot__glyph">☾</span><div><strong>Lunar Dart</strong><small>Novice</small></div><i></i>
+            </li>
+            <li class="spell-slot" data-spell-slot="1" style="--slot-charge: 1">
+              <kbd>E</kbd><span class="spell-slot__glyph spell-slot__glyph--aurora">✦</span><div><strong>Aurora Veil</strong><small>Novice</small></div><i></i>
+            </li>
+            <li class="spell-slot is-locked" data-spell-slot="2" style="--slot-charge: 0">
+              <kbd>3</kbd><span class="spell-slot__glyph">⊘</span><div><strong>Unremembered</strong><small>Find its star</small></div><i></i>
+            </li>
+          </ol>
+        </section>
+
+        <div id="context-prompt" class="context-prompt" role="status" hidden>
+          <kbd id="prompt-key">F</kbd>
+          <span><small id="prompt-action">Interact</small><strong id="prompt-label">Read the weathered inscription</strong></span>
+        </div>
+
+        <div id="discovery-overlay" class="discovery-overlay" role="status" hidden>
+          <div class="discovery-overlay__orbit" aria-hidden="true"><i></i><span>✦</span></div>
+          <div>
+            <p class="eyebrow" id="discovery-kicker">Celestial memory restored</p>
+            <strong id="discovery-title">A nameless star stirs</strong>
+            <span id="discovery-detail">Its light reaches the spiral school once more.</span>
+          </div>
+        </div>
+      </section>
+
+      <section id="menu-layer" class="menu-layer" aria-live="assertive" hidden>
+        <div class="menu-backdrop" aria-hidden="true"></div>
+        <article class="menu-panel" data-menu-panel="pause" role="dialog" aria-modal="true" aria-labelledby="pause-title" hidden>
+          <p class="eyebrow">The world holds its breath</p>
+          <h2 id="pause-title">Pilgrimage paused</h2>
+          <p>Return to the silent tundra, or attend to the instruments of your journey.</p>
+          <div class="menu-actions">
+            <button class="rune-button rune-button--primary" type="button" data-game-intent="pause" data-ui-action="resume">Resume</button>
+            <button class="rune-button" type="button" data-ui-action="settings" data-ui-sound="confirm">Settings</button>
+            <button class="rune-button" type="button" data-game-intent="restart" data-ui-action="restart" data-ui-sound="cancel">Restart pilgrimage</button>
+          </div>
+        </article>
+
+        <article class="menu-panel" data-menu-panel="death" role="dialog" aria-modal="true" aria-labelledby="death-title" hidden>
+          <div class="menu-sigil menu-sigil--death" aria-hidden="true">☾</div>
+          <p class="eyebrow">The firmament recedes</p>
+          <h2 id="death-title">You are forgotten</h2>
+          <p id="death-detail">Even extinguished stars leave an afterimage.</p>
+          <div class="menu-actions">
+            <button class="rune-button rune-button--primary" type="button" data-game-intent="restart" data-ui-action="restart" data-ui-sound="confirm">Rise at the spire</button>
+          </div>
+        </article>
+
+        <article class="menu-panel" data-menu-panel="victory" role="dialog" aria-modal="true" aria-labelledby="victory-title" hidden>
+          <div class="menu-sigil" aria-hidden="true">✦</div>
+          <p class="eyebrow">Constellation restored</p>
+          <h2 id="victory-title">The sky remembers</h2>
+          <p id="victory-detail">Every recovered light strengthens the failing school.</p>
+          <div class="menu-actions">
+            <button class="rune-button rune-button--primary" type="button" data-ui-action="continue" data-ui-sound="confirm">Continue beneath the stars</button>
+            <button class="rune-button" type="button" data-game-intent="restart" data-ui-action="restart" data-ui-sound="cancel">Begin another pilgrimage</button>
+          </div>
+        </article>
+
+        <article class="menu-panel menu-panel--settings" data-menu-panel="settings" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
+          <p class="eyebrow">Instruments</p>
+          <h2 id="settings-title">Settings</h2>
+          <div class="setting-row">
+            <span><strong>Sound</strong><small>Ambience and celestial effects</small></span>
+            <label class="switch"><input id="mute-setting" type="checkbox" /><i></i><b>Mute</b></label>
+          </div>
+          <div class="setting-row">
+            <span><strong>Reduced motion</strong><small>Quiets interface movement and flashes</small></span>
+            <label class="switch"><input id="motion-setting" type="checkbox" /><i></i><b>Reduce</b></label>
+          </div>
+          <div class="menu-actions">
+            <button class="rune-button rune-button--primary" type="button" data-ui-action="back" data-ui-sound="confirm">Return</button>
+          </div>
+        </article>
+      </section>
+
+      <nav id="touch-controls" aria-label="Touch controls">
+        <div class="touch-controls__left">
+          <div id="touch-stick" aria-label="Movement stick">
+            <div id="touch-knob"><i aria-hidden="true"></i></div>
+          </div>
+          <button id="interact-button" class="touch-action touch-action--interact" type="button" data-game-intent="interact" aria-label="Interact">
+            <span>◇</span><small>Use</small>
+          </button>
+        </div>
+        <div class="touch-controls__right">
+          <button id="melee-button" class="touch-action touch-action--melee" type="button" data-game-intent="melee" aria-label="Melee attack">
+            <span>†</span><small>Melee</small>
+          </button>
+          <button id="lunar-button" class="touch-action touch-action--lunar" type="button" data-game-intent="lunar" aria-label="Cast lunar sorcery">
+            <span>☾</span><small>Lunar</small>
+          </button>
+          <button id="aurora-button" class="touch-action touch-action--aurora" type="button" data-game-intent="aurora" aria-label="Cast aurora light">
+            <span>✦</span><small>Aurora</small>
+          </button>
+          <button id="dash-button" class="touch-action touch-action--dodge" type="button" data-game-intent="dodge" aria-label="Dodge">
+            <span>↝</span><small>Dodge</small>
+          </button>
+        </div>
+      </nav>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
