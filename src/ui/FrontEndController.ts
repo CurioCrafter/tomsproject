@@ -1,7 +1,9 @@
 import {
   cloneCharacterProfile,
   sanitizeCharacterProfile,
+  STARTING_ABILITY_IDS,
   type CharacterProfile,
+  type StartingAbilityId,
 } from '../game/CharacterProfile';
 import { loadCharacterProfile, saveCharacterProfile } from '../game/CharacterProfileStore';
 import { HUD_MENU_STATE_EVENT, type HudMenuStateDetail } from '../systems/Hud';
@@ -33,6 +35,18 @@ const PROFILE_LABELS = {
     'celestial-gold': 'Celestial gold',
   },
   catalyst: { 'crescent-staff': 'Crescent staff', 'ash-wand': 'Ash wand', 'bare-hands': 'Bare hands' },
+  origin: {
+    'lunar-penitent': 'Lunar Penitent',
+    'aurora-votary': 'Aurora Votary',
+    'comet-warden': 'Comet Warden',
+    'eclipse-outcast': 'Eclipse Outcast',
+  },
+  startingAbility: {
+    'lunar-dart': 'Lunar Dart',
+    'aurora-veil': 'Aurora Veil',
+    'comet-lance': 'Comet Lance',
+    'eclipse-step': 'Eclipse Step',
+  },
 } as const;
 
 const GAMEPLAY_KEYS = new Set([
@@ -64,6 +78,12 @@ export class FrontEndController {
   private readonly controlsButton = this.requireElement<HTMLButtonElement>('#front-controls-button');
   private readonly form = this.requireElement<HTMLFormElement>('#character-form');
   private readonly nameInput = this.requireElement<HTMLInputElement>('#character-name');
+  private readonly startingAbilityFieldset = this.requireElement<HTMLFieldSetElement>('#starting-ability-fieldset');
+  private readonly startingAbilityCount = this.requireElement<HTMLOutputElement>('#starting-ability-count');
+  private readonly startingAbilityError = this.requireElement<HTMLElement>('#starting-ability-error');
+  private readonly startingAbilityInputs = Array.from(
+    this.form.querySelectorAll<HTMLInputElement>('input[name="startingAbilities"]'),
+  );
   private readonly creatorStatus = this.requireElement<HTMLElement>('#creator-status');
   private readonly profileName = this.requireElement<HTMLElement>('#front-profile-name');
   private readonly profileDetail = this.requireElement<HTMLElement>('#front-profile-detail');
@@ -173,8 +193,8 @@ export class FrontEndController {
     // title veil is retired.
     this.requireElement<HTMLButtonElement>('#enter-game').addEventListener('click', () => this.begin(this.profile));
 
-    this.form.addEventListener('input', () => this.previewDraft());
-    this.form.addEventListener('change', () => this.previewDraft());
+    this.form.addEventListener('input', (event) => this.handleFormEdit(event));
+    this.form.addEventListener('change', (event) => this.handleFormEdit(event));
     this.form.addEventListener('submit', (event) => {
       event.preventDefault();
       this.saveDraft(true);
@@ -195,6 +215,7 @@ export class FrontEndController {
 
   private saveDraft(begin: boolean): void {
     if (!this.validateName()) return;
+    if (!this.validateStartingAbilities()) return;
     this.draft = this.readDraft();
     this.nameInput.value = this.draft.name;
     const result = saveCharacterProfile(this.draft);
@@ -219,26 +240,37 @@ export class FrontEndController {
 
   private previewDraft(): void {
     this.validateName(false);
+    const abilitiesValid = this.validateStartingAbilities(false);
     const previous = this.draft;
     this.draft = this.readDraft();
-    delete this.creatorStatus.dataset.state;
-    this.creatorStatus.textContent = `${this.draft.name} · ${PROFILE_LABELS.lifeStage[this.draft.lifeStage]} · ${PROFILE_LABELS.catalyst[this.draft.catalyst]}`;
-    if (this.appearanceChanged(previous, this.draft)) this.dispatchIntent('preview', this.draft);
+    if (abilitiesValid) {
+      delete this.creatorStatus.dataset.state;
+      this.creatorStatus.textContent = this.draftSummary(this.draft);
+    } else {
+      this.creatorStatus.dataset.state = 'warning';
+      const remaining = Math.max(0, 2 - this.selectedStartingAbilities().length);
+      this.creatorStatus.textContent = `Choose ${remaining} more starting ${remaining === 1 ? 'sorcery' : 'sorceries'} before continuing.`;
+    }
+    if (this.previewRelevantChanged(previous, this.draft)) this.dispatchIntent('preview', this.draft);
   }
 
-  private appearanceChanged(previous: CharacterProfile, next: CharacterProfile): boolean {
+  private previewRelevantChanged(previous: CharacterProfile, next: CharacterProfile): boolean {
     return (
       previous.lifeStage !== next.lifeStage ||
       previous.frame !== next.frame ||
       previous.veil !== next.veil ||
       previous.robeDye !== next.robeDye ||
       previous.astralMetal !== next.astralMetal ||
-      previous.catalyst !== next.catalyst
+      previous.catalyst !== next.catalyst ||
+      previous.origin !== next.origin ||
+      previous.startingAbilities[0] !== next.startingAbilities[0] ||
+      previous.startingAbilities[1] !== next.startingAbilities[1]
     );
   }
 
   private readDraft(): CharacterProfile {
     const data = new FormData(this.form);
+    const selectedAbilities = this.selectedStartingAbilities();
     return sanitizeCharacterProfile({
       name: data.get('name'),
       lifeStage: data.get('lifeStage'),
@@ -247,6 +279,8 @@ export class FrontEndController {
       robeDye: data.get('robeDye'),
       astralMetal: data.get('astralMetal'),
       catalyst: data.get('catalyst'),
+      origin: data.get('origin'),
+      startingAbilities: selectedAbilities.length === 2 ? selectedAbilities : this.draft.startingAbilities,
     });
   }
 
@@ -260,11 +294,61 @@ export class FrontEndController {
       robeDye: this.draft.robeDye,
       astralMetal: this.draft.astralMetal,
       catalyst: this.draft.catalyst,
+      origin: this.draft.origin,
     };
     for (const [name, value] of Object.entries(values)) {
       const input = this.form.querySelector<HTMLInputElement>(`input[name="${name}"][value="${value}"]`);
       if (input) input.checked = true;
     }
+    for (const input of this.startingAbilityInputs) {
+      input.checked = this.draft.startingAbilities.includes(input.value as StartingAbilityId);
+    }
+    this.validateStartingAbilities(false);
+  }
+
+  private handleFormEdit(event: Event): void {
+    const target = event.target;
+    if (
+      target instanceof HTMLInputElement &&
+      target.name === 'startingAbilities' &&
+      target.type === 'checkbox' &&
+      target.checked
+    ) {
+      const selected = this.startingAbilityInputs.filter((input) => input.checked);
+      if (selected.length > 2) {
+        const displaced = selected.find((input) => input !== target);
+        if (displaced) displaced.checked = false;
+      }
+    }
+    this.previewDraft();
+  }
+
+  private selectedStartingAbilities(): StartingAbilityId[] {
+    return this.startingAbilityInputs
+      .filter((input) => input.checked)
+      .map((input) => input.value)
+      .filter((value): value is StartingAbilityId => STARTING_ABILITY_IDS.includes(value as StartingAbilityId));
+  }
+
+  private validateStartingAbilities(report = true): boolean {
+    const selected = this.selectedStartingAbilities();
+    const valid = selected.length === 2 && new Set(selected).size === 2;
+    const message = valid ? '' : 'Choose exactly two distinct starting sorceries.';
+    this.startingAbilityCount.value = `${selected.length} of 2 chosen`;
+    this.startingAbilityFieldset.setAttribute('aria-invalid', String(!valid));
+    this.startingAbilityError.hidden = valid;
+    this.startingAbilityError.textContent = message;
+    for (const input of this.startingAbilityInputs) {
+      input.setCustomValidity(message);
+      input.setAttribute('aria-invalid', String(!valid));
+    }
+    if (!valid && report) {
+      this.startingAbilityFieldset.scrollIntoView({ block: 'nearest' });
+      (this.startingAbilityInputs.find((input) => !input.checked) ?? this.startingAbilityInputs[0])?.focus({
+        preventScroll: true,
+      });
+    }
+    return valid;
   }
 
   private validateName(report = true): boolean {
@@ -276,13 +360,12 @@ export class FrontEndController {
 
   private renderProfileSummary(): void {
     this.profileName.textContent = this.profile.name;
-    this.profileDetail.textContent = [
-      PROFILE_LABELS.lifeStage[this.profile.lifeStage],
-      PROFILE_LABELS.veil[this.profile.veil],
-      PROFILE_LABELS.robeDye[this.profile.robeDye],
-      PROFILE_LABELS.astralMetal[this.profile.astralMetal],
-      PROFILE_LABELS.catalyst[this.profile.catalyst],
-    ].join(' · ');
+    this.profileDetail.textContent = this.draftSummary(this.profile);
+  }
+
+  private draftSummary(profile: CharacterProfile): string {
+    const abilities = profile.startingAbilities.map((ability) => PROFILE_LABELS.startingAbility[ability]).join(' + ');
+    return `${PROFILE_LABELS.origin[profile.origin]} · ${abilities} · ${PROFILE_LABELS.catalyst[profile.catalyst]}`;
   }
 
   private toggleControls(): void {

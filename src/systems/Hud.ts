@@ -12,7 +12,7 @@ export type HudObjectiveSnapshot = {
   elapsed: number;
 };
 
-export type HudSpellSchool = 'lunar' | 'aurora' | 'celestial' | 'lightless' | 'locked';
+export type HudSpellSchool = 'lunar' | 'aurora' | 'comet' | 'eclipse' | 'celestial' | 'lightless' | 'locked';
 
 export type HudSpellSnapshot = {
   id: string;
@@ -117,7 +117,12 @@ type RuntimeGameState = {
   };
   enemies?: { active?: number; defeated?: number };
   boss?: { spawned?: boolean; active?: boolean; health?: number; maxHealth?: number; phase?: number; name?: string; epithet?: string };
-  progression?: { restored?: number; target?: number };
+  progression?: {
+    restored?: number;
+    target?: number;
+    abilities?: readonly Readonly<{ id?: string; name?: string; school?: string; glyph?: string; level?: number }>[];
+    equippedAbilityIds?: readonly (string | null)[];
+  };
   affinity?: { celestial?: number; wrathful?: number; mercy?: number };
   comprehension?: {
     lunar?: { uses?: number; tier?: string };
@@ -257,6 +262,7 @@ export class Hud {
   private focusedBeforeMenu: HTMLElement | null = null;
   private completeShown = false;
   private lastRuntimeStateAt = -Infinity;
+  private runtimeBridgeSeen = false;
 
   constructor() {
     const storedReducedMotion = this.readBoolean('last-firmament-reduced-motion');
@@ -308,7 +314,7 @@ export class Hud {
   update(score: number, target: number, elapsed: number, complete: boolean): void {
     const clampedTarget = Math.max(0, target);
     const clampedScore = Math.max(0, Math.min(score, clampedTarget || score));
-    const runtimeBridgeActive = performance.now() - this.lastRuntimeStateAt < 1000;
+    const runtimeBridgeActive = this.runtimeBridgeSeen || performance.now() - this.lastRuntimeStateAt < 1000;
     this.patchSnapshot(
       runtimeBridgeActive
         ? { objective: { elapsed: Math.max(0, elapsed) } }
@@ -525,6 +531,7 @@ export class Hud {
   private handleRuntimeState(state: RuntimeGameState): void {
     if (!state) return;
     this.lastRuntimeStateAt = performance.now();
+    this.runtimeBridgeSeen = true;
     const phase = state.phase ?? 'exploration';
     const restored = state.progression?.restored ?? state.restorationCount ?? this.snapshot.objective.current;
     const restorationTarget = state.progression?.target ?? state.targetScore ?? this.snapshot.objective.target;
@@ -546,14 +553,42 @@ export class Hud {
     else if (state.paused || phase === 'paused') menu = menu === 'settings' ? 'settings' : 'pause';
     else if (menu === 'pause' || menu === 'death' || menu === 'victory') menu = 'none';
 
-    const spells = this.snapshot.spells.map((spell, index) => {
-      const track = index === 0 ? state.comprehension?.lunar : index === 1 ? state.comprehension?.aurora : undefined;
-      return {
-        ...spell,
-        comprehension: track?.tier ?? spell.comprehension,
-        charge: index < 2 ? this.ratio(player.focus ?? 0, player.maxFocus ?? 1) : spell.charge,
-      };
-    });
+    const equippedIds = state.progression?.equippedAbilityIds;
+    const knownAbilities = state.progression?.abilities ?? [];
+    const spellKeys = ['Q', 'E', '3'] as const;
+    const spells = equippedIds
+      ? spellKeys.map((key, index): HudSpellSnapshot => {
+          const abilityId = equippedIds[index];
+          const ability = knownAbilities.find((candidate) => candidate.id === abilityId);
+          if (!abilityId || !ability) {
+            return {
+              id: `unremembered-${index}`,
+              name: 'Unremembered',
+              school: 'locked',
+              comprehension: 'Find its star',
+              key,
+              glyph: '⊘',
+              charge: 0,
+              locked: true,
+            };
+          }
+          const school: HudSpellSchool =
+            ability.school === 'aurora' || ability.school === 'comet' || ability.school === 'eclipse'
+              ? ability.school
+              : 'lunar';
+          const track = school === 'aurora' ? state.comprehension?.aurora : state.comprehension?.lunar;
+          return {
+            id: ability.id ?? abilityId,
+            name: ability.name ?? 'Unnamed Sorcery',
+            school,
+            comprehension: `${track?.tier ?? 'Novice'} · rank ${ability.level ?? 1}`,
+            key,
+            glyph: ability.glyph ?? (school === 'aurora' ? '✦' : school === 'comet' ? '✧' : school === 'eclipse' ? '◐' : '☾'),
+            charge: this.ratio(player.focus ?? 0, player.maxFocus ?? 1),
+            active: index === 0,
+          };
+        })
+      : this.snapshot.spells;
 
     this.patchSnapshot({
       vitality: {

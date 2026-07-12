@@ -1,4 +1,4 @@
-export const CHARACTER_PROFILE_SCHEMA_VERSION = 1 as const;
+export const CHARACTER_PROFILE_SCHEMA_VERSION = 2 as const;
 
 export const LIFE_STAGES = ['young', 'elder'] as const;
 export const BODY_FRAMES = ['slender', 'sturdy'] as const;
@@ -6,6 +6,8 @@ export const VEIL_STYLES = ['deep-hood', 'moon-mask', 'unveiled'] as const;
 export const ROBE_DYES = ['midnight', 'ash', 'moss', 'oxblood'] as const;
 export const ASTRAL_METALS = ['lunar-silver', 'aurora-bronze', 'celestial-gold'] as const;
 export const CATALYST_STYLES = ['crescent-staff', 'ash-wand', 'bare-hands'] as const;
+export const PILGRIM_ORIGINS = ['lunar-penitent', 'aurora-votary', 'comet-warden', 'eclipse-outcast'] as const;
+export const STARTING_ABILITY_IDS = ['lunar-dart', 'aurora-veil', 'comet-lance', 'eclipse-step'] as const;
 
 export type LifeStage = (typeof LIFE_STAGES)[number];
 export type BodyFrame = (typeof BODY_FRAMES)[number];
@@ -13,6 +15,8 @@ export type VeilStyle = (typeof VEIL_STYLES)[number];
 export type RobeDye = (typeof ROBE_DYES)[number];
 export type AstralMetal = (typeof ASTRAL_METALS)[number];
 export type CatalystStyle = (typeof CATALYST_STYLES)[number];
+export type PilgrimOrigin = (typeof PILGRIM_ORIGINS)[number];
+export type StartingAbilityId = (typeof STARTING_ABILITY_IDS)[number];
 
 export type CharacterProfile = {
   schemaVersion: typeof CHARACTER_PROFILE_SCHEMA_VERSION;
@@ -23,6 +27,8 @@ export type CharacterProfile = {
   robeDye: RobeDye;
   astralMetal: AstralMetal;
   catalyst: CatalystStyle;
+  origin: PilgrimOrigin;
+  startingAbilities: readonly [StartingAbilityId, StartingAbilityId];
 };
 
 export const DEFAULT_CHARACTER_PROFILE: Readonly<CharacterProfile> = Object.freeze({
@@ -34,6 +40,8 @@ export const DEFAULT_CHARACTER_PROFILE: Readonly<CharacterProfile> = Object.free
   robeDye: 'midnight',
   astralMetal: 'lunar-silver',
   catalyst: 'crescent-staff',
+  origin: 'lunar-penitent',
+  startingAbilities: ['lunar-dart', 'aurora-veil'] as const,
 });
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -41,6 +49,16 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const isMember = <T extends string>(value: unknown, options: readonly T[]): value is T =>
   typeof value === 'string' && options.includes(value as T);
+
+function sanitizeStartingAbilities(source: Record<string, unknown>): readonly [StartingAbilityId, StartingAbilityId] {
+  const candidates = Array.isArray(source.startingAbilities)
+    ? source.startingAbilities
+    : [source.primaryAbility, source.secondaryAbility];
+  const unique = candidates.filter((value): value is StartingAbilityId => isMember(value, STARTING_ABILITY_IDS))
+    .filter((value, index, values) => values.indexOf(value) === index);
+  if (unique.length < 2) return [...DEFAULT_CHARACTER_PROFILE.startingAbilities];
+  return [unique[0], unique[1]];
+}
 
 export function normalizeCharacterName(value: unknown): string {
   if (typeof value !== 'string') return DEFAULT_CHARACTER_PROFILE.name;
@@ -67,9 +85,11 @@ export function sanitizeCharacterProfile(value: unknown): CharacterProfile {
     robeDye: isMember(source.robeDye, ROBE_DYES) ? source.robeDye : DEFAULT_CHARACTER_PROFILE.robeDye,
     astralMetal: isMember(source.astralMetal, ASTRAL_METALS) ? source.astralMetal : DEFAULT_CHARACTER_PROFILE.astralMetal,
     catalyst: isMember(source.catalyst, CATALYST_STYLES) ? source.catalyst : DEFAULT_CHARACTER_PROFILE.catalyst,
+    origin: isMember(source.origin, PILGRIM_ORIGINS) ? source.origin : DEFAULT_CHARACTER_PROFILE.origin,
+    startingAbilities: sanitizeStartingAbilities(source),
   };
 }
 
 export function cloneCharacterProfile(profile: CharacterProfile): CharacterProfile {
-  return { ...profile };
+  return { ...profile, startingAbilities: [...profile.startingAbilities] };
 }

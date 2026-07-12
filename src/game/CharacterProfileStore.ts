@@ -7,6 +7,7 @@ import {
 } from './CharacterProfile';
 
 export const CHARACTER_PROFILE_STORAGE_KEY = `last-firmament.character.v${CHARACTER_PROFILE_SCHEMA_VERSION}`;
+export const LEGACY_CHARACTER_PROFILE_STORAGE_KEY = 'last-firmament.character.v1';
 
 export type CharacterProfileSaveResult = Readonly<{
   profile: CharacterProfile;
@@ -25,9 +26,18 @@ function browserStorage(): Storage | null {
 export function loadCharacterProfile(storage: Storage | null = browserStorage()): CharacterProfile {
   if (!storage) return cloneCharacterProfile(DEFAULT_CHARACTER_PROFILE);
   try {
-    const raw = storage.getItem(CHARACTER_PROFILE_STORAGE_KEY);
+    const raw = storage.getItem(CHARACTER_PROFILE_STORAGE_KEY) ?? storage.getItem(LEGACY_CHARACTER_PROFILE_STORAGE_KEY);
     if (!raw) return cloneCharacterProfile(DEFAULT_CHARACTER_PROFILE);
-    return sanitizeCharacterProfile(JSON.parse(raw) as unknown);
+    const profile = sanitizeCharacterProfile(JSON.parse(raw) as unknown);
+    if (!storage.getItem(CHARACTER_PROFILE_STORAGE_KEY)) {
+      try {
+        storage.setItem(CHARACTER_PROFILE_STORAGE_KEY, JSON.stringify(profile));
+      } catch {
+        // A readable legacy profile remains valid for this session even if the
+        // browser refuses the best-effort v2 migration write.
+      }
+    }
+    return profile;
   } catch {
     return cloneCharacterProfile(DEFAULT_CHARACTER_PROFILE);
   }

@@ -39,6 +39,11 @@ interface Window {
     claimAvailableCheckpoint(): void;
     showEncounter(encounterId: string): void;
     showSection(sectionId: string): void;
+    chooseBranch(choiceId: string, optionId: string): void;
+    activateBranchEncounter(encounterId: string): void;
+    defeatActiveBranchEncounter(): void;
+    claimReward(choiceIndex?: number): void;
+    allocateSpec(branch: 'moon' | 'aurora' | 'eclipse'): void;
     victoryTrade(): void;
   };
 }

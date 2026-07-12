@@ -11,6 +11,10 @@ export type EnemyVariant =
   | 'ashenInitiate'
   | 'astralLancer'
   | 'eclipseChorister'
+  | 'emberPenitent'
+  | 'drownedCantor'
+  | 'prismScribe'
+  | 'thornReliquary'
   | 'orreryCastellan';
 
 export type SorcererAppearanceOptions = {
@@ -929,6 +933,366 @@ export function createOrreryCastellanEnemy(materials: MaterialLibrary): Authored
   });
 }
 
+export function createEmberPenitentEnemy(materials: MaterialLibrary): AuthoredModel {
+  const builder = new ModelBuilder('enemy.emberPenitent');
+  const body = builder.group('emberPenitentBody');
+  const emberMaterial = builder.cloneMaterial(
+    materials.get<THREE.MeshStandardMaterial>('danger'),
+    'material.emberPenitentFlame',
+    (material) => {
+      material.color.set('#ff8a2b');
+      material.emissive.set('#a72a08');
+      material.emissiveIntensity = 1.65;
+      material.roughness = 0.24;
+    },
+  );
+  const furnaceIron = builder.cloneMaterial(
+    materials.get<THREE.MeshStandardMaterial>('blackSlate'),
+    'material.emberPenitentIron',
+    (material) => {
+      material.color.set('#3c211f');
+      material.roughness = 0.74;
+      material.metalness = 0.42;
+    },
+  );
+
+  const skirt = builder.mesh('furnaceSkirt', new THREE.ConeGeometry(0.72, 1.42, 9, 2, true), furnaceIron, body);
+  skirt.position.y = 0.72;
+  const breastplate = builder.mesh('sunScarBreastplate', new THREE.DodecahedronGeometry(0.54, 0), furnaceIron, body);
+  breastplate.position.y = 1.48;
+  breastplate.scale.set(1.04, 1.18, 0.72);
+  const furnaceCore = builder.mesh('furnaceCore', new THREE.IcosahedronGeometry(0.2, 1), emberMaterial, body, false);
+  furnaceCore.position.set(0, 1.42, -0.5);
+  const helm = builder.mesh('penitentBellHelm', new THREE.CylinderGeometry(0.29, 0.43, 0.62, 8, 1, true), furnaceIron, body);
+  helm.position.y = 2.16;
+  const visor = builder.mesh('burningVisor', new THREE.BoxGeometry(0.32, 0.055, 0.04), emberMaterial, helm, false);
+  visor.position.set(0, 0.02, -0.37);
+
+  for (const side of [-1, 1]) {
+    const pauldron = builder.mesh(
+      `${side < 0 ? 'left' : 'right'}KilnPauldron`,
+      new THREE.ConeGeometry(0.25, 0.72, 5),
+      materials.get('celestialGold'),
+      body,
+    );
+    pauldron.position.set(side * 0.62, 1.58, 0.04);
+    pauldron.rotation.z = side * -Math.PI / 2;
+  }
+
+  const censerJoint = builder.group('sunCenserJoint', body);
+  censerJoint.position.set(0.62, 1.38, -0.05);
+  for (let link = 0; link < 3; link += 1) {
+    const chain = builder.mesh(
+      `sunCenserChain.${link}`,
+      new THREE.TorusGeometry(0.085, 0.018, 5, 10),
+      materials.get('lunarSilver'),
+      censerJoint,
+    );
+    chain.position.set(0.1 + link * 0.08, -0.25 - link * 0.23, -0.1 - link * 0.12);
+    chain.rotation.y = link % 2 === 0 ? 0 : Math.PI / 2;
+  }
+  const censer = builder.mesh('sunCenser', new THREE.DodecahedronGeometry(0.29, 0), furnaceIron, censerJoint);
+  censer.position.set(0.35, -0.96, -0.46);
+  const censerFlame = builder.mesh('sunCenserFlame', new THREE.OctahedronGeometry(0.13, 0), emberMaterial, censer, false);
+  censerFlame.position.y = 0.2;
+  const vents: THREE.Mesh[] = [];
+  for (let index = 0; index < 4; index += 1) {
+    const angle = index / 4 * Math.PI * 2;
+    const vent = builder.mesh(`furnaceVent.${index}`, new THREE.BoxGeometry(0.12, 0.32, 0.045), emberMaterial, breastplate, false);
+    vent.position.set(Math.sin(angle) * 0.39, 0, Math.cos(angle) * 0.39);
+    vent.rotation.y = angle;
+    vents.push(vent);
+  }
+
+  addContactShadow(builder, materials, 0.86, 0.72);
+  const hitSocket = addSocket(builder, 'hitSocket', breastplate, new THREE.Vector3(0, 0, -0.45));
+  const castSocket = addSocket(builder, 'castSocket', censerFlame, new THREE.Vector3(0, 0.12, 0));
+  const collision = builder.collision('collisionProxy', new THREE.CapsuleGeometry(0.6, 1.28, 4, 8));
+  collision.position.y = 1.15;
+
+  return builder.finish(collision, { hit: hitSocket, cast: castSocket }, (_delta, elapsed, intensity) => {
+    body.position.y = 0.04 + Math.sin(elapsed * 2.8) * 0.035;
+    body.rotation.x = 0.035 + Math.max(0, Math.sin(elapsed * 1.35)) * 0.025 * intensity;
+    censerJoint.rotation.x = -0.18 + Math.sin(elapsed * 2.4) * 0.34 * intensity;
+    censerJoint.rotation.z = -0.16 + Math.sin(elapsed * 1.2) * 0.1;
+    furnaceCore.rotation.y = elapsed * 2.1;
+    const pulse = 0.88 + Math.sin(elapsed * 7.2) * 0.1 + intensity * 0.06;
+    furnaceCore.scale.setScalar(pulse);
+    censerFlame.scale.setScalar(0.8 + Math.sin(elapsed * 8.6 + 0.7) * 0.14 + intensity * 0.08);
+    vents.forEach((vent, index) => { vent.scale.y = 0.75 + Math.sin(elapsed * 5.4 + index) * 0.22; });
+  });
+}
+
+export function createDrownedCantorEnemy(materials: MaterialLibrary): AuthoredModel {
+  const builder = new ModelBuilder('enemy.drownedCantor');
+  const body = builder.group('drownedCantorBody');
+  const tideLight = builder.cloneMaterial(
+    materials.get<THREE.MeshStandardMaterial>('spirit'),
+    'material.drownedCantorTideLight',
+    (material) => {
+      material.color.set('#79e6ef');
+      material.emissive.set('#0a6674');
+      material.emissiveIntensity = 1.35;
+    },
+  );
+  const patina = builder.cloneMaterial(
+    materials.get<THREE.MeshStandardMaterial>('lunarSilver'),
+    'material.drownedCantorPatina',
+    (material) => {
+      material.color.set('#397b82');
+      material.roughness = 0.58;
+      material.metalness = 0.62;
+    },
+  );
+
+  const robeProfile = [
+    new THREE.Vector2(0.72, 0),
+    new THREE.Vector2(0.66, 0.32),
+    new THREE.Vector2(0.38, 1.42),
+    new THREE.Vector2(0.32, 1.72),
+  ];
+  const robe = builder.mesh('floodedBellRobe', new THREE.LatheGeometry(robeProfile, 12), materials.get('void'), body);
+  robe.position.y = 0.05;
+  const bellMouth = builder.mesh('robeBellMouth', new THREE.TorusGeometry(0.7, 0.06, 7, 28), patina, body);
+  bellMouth.position.y = 0.12;
+  bellMouth.rotation.x = Math.PI / 2;
+
+  const belfry = builder.group('headBelfry', body);
+  belfry.position.y = 1.86;
+  const crown = builder.mesh('belfryCrown', new THREE.ConeGeometry(0.5, 0.56, 8, 1, true), patina, belfry);
+  crown.position.y = 0.28;
+  const clapper = builder.mesh('luminousClapper', new THREE.OctahedronGeometry(0.17, 0), tideLight, belfry, false);
+  clapper.position.set(0, -0.2, -0.16);
+  for (let index = 0; index < 6; index += 1) {
+    const angle = index / 6 * Math.PI * 2;
+    addBeam(
+      builder,
+      belfry,
+      `belfryRib.${index}`,
+      new THREE.Vector3(Math.sin(angle) * 0.34, -0.2, Math.cos(angle) * 0.34),
+      new THREE.Vector3(Math.sin(angle) * 0.16, 0.52, Math.cos(angle) * 0.16),
+      0.028,
+      patina,
+      5,
+    );
+  }
+
+  const choirRings: THREE.Mesh[] = [];
+  for (let index = 0; index < 3; index += 1) {
+    const ring = builder.mesh(
+      `drownedChoirRing.${index}`,
+      new THREE.TorusGeometry(0.68 + index * 0.2, 0.03, 6, 26),
+      index === 1 ? tideLight : patina,
+      body,
+      false,
+    );
+    ring.position.y = 1.3 + index * 0.22;
+    ring.rotation.set(index * 0.55, index * 0.72, index * 0.38);
+    ring.userData.baseRotation = ring.rotation.clone();
+    choirRings.push(ring);
+  }
+  const droplets: THREE.Mesh[] = [];
+  for (let index = 0; index < 4; index += 1) {
+    droplets.push(builder.mesh(`orbitingTideNote.${index}`, new THREE.TetrahedronGeometry(0.09, 0), tideLight, body, false));
+  }
+
+  addContactShadow(builder, materials, 0.74, 0.62);
+  const hitSocket = addSocket(builder, 'hitSocket', robe, new THREE.Vector3(0, 1.02, 0));
+  const castSocket = addSocket(builder, 'castSocket', clapper, new THREE.Vector3(0, 0, -0.12));
+  const collision = builder.collision('collisionProxy', new THREE.CapsuleGeometry(0.53, 1.18, 4, 8));
+  collision.position.y = 1.05;
+
+  return builder.finish(collision, { hit: hitSocket, cast: castSocket }, (_delta, elapsed, intensity) => {
+    body.position.y = 0.1 + Math.sin(elapsed * 1.65) * 0.09;
+    belfry.rotation.z = Math.sin(elapsed * 1.35) * 0.08 * intensity;
+    clapper.position.x = Math.sin(elapsed * 3.4) * 0.12 * intensity;
+    clapper.scale.setScalar(0.86 + Math.sin(elapsed * 6.8) * 0.12 + intensity * 0.05);
+    choirRings.forEach((ring, index) => {
+      const base = ring.userData.baseRotation as THREE.Euler;
+      ring.rotation.set(base.x, base.y + elapsed * (index % 2 === 0 ? 0.2 : -0.17), base.z);
+    });
+    droplets.forEach((droplet, index) => {
+      const angle = elapsed * 0.72 + index * Math.PI * 0.5;
+      droplet.position.set(Math.cos(angle) * 0.94, 1.05 + Math.sin(angle * 1.7) * 0.42, Math.sin(angle) * 0.7);
+      droplet.rotation.y = elapsed * 1.7 + index;
+    });
+  });
+}
+
+export function createPrismScribeEnemy(materials: MaterialLibrary): AuthoredModel {
+  const builder = new ModelBuilder('enemy.prismScribe');
+  const body = builder.group('prismScribeBody');
+  const prismLight = builder.cloneMaterial(
+    materials.get<THREE.MeshStandardMaterial>('danger'),
+    'material.prismScribeLight',
+    (material) => {
+      material.color.set('#d886ff');
+      material.emissive.set('#6717a1');
+      material.emissiveIntensity = 1.55;
+      material.roughness = 0.18;
+    },
+  );
+  const pageMaterial = builder.cloneMaterial(
+    materials.get<THREE.MeshStandardMaterial>('robe'),
+    'material.prismScribePage',
+    (material) => {
+      material.color.set('#c9b5df');
+      material.emissive.set('#26113f');
+      material.emissiveIntensity = 0.45;
+    },
+  );
+
+  const prism = builder.mesh('forbiddenIndexPrism', new THREE.OctahedronGeometry(0.48, 1), prismLight, body, false);
+  prism.position.y = 1.25;
+  prism.scale.set(0.72, 1.34, 0.72);
+  const voidLens = builder.mesh('scribeVoidLens', new THREE.SphereGeometry(0.18, 12, 8), materials.get('void'), prism, false);
+  voidLens.position.z = -0.44;
+  const browRune = builder.mesh('scribeBrowRune', new THREE.TorusGeometry(0.16, 0.025, 6, 18, Math.PI * 1.55), prismLight, prism, false);
+  browRune.position.set(0, 0.24, -0.42);
+  browRune.rotation.z = Math.PI * 0.22;
+
+  const pageJoints: THREE.Group[] = [];
+  for (let index = 0; index < 6; index += 1) {
+    const pageJoint = builder.group(`levitatingPageJoint.${index}`, body);
+    const page = builder.mesh(`levitatingPage.${index}`, new THREE.BoxGeometry(0.52, 0.035, 0.72), pageMaterial, pageJoint);
+    const glyph = builder.mesh(`pageGlyph.${index}`, new THREE.BoxGeometry(0.3, 0.018, 0.045), prismLight, page, false);
+    glyph.position.y = 0.03;
+    glyph.position.z = -0.08 + index % 3 * 0.12;
+    pageJoints.push(pageJoint);
+  }
+  const quills: THREE.Group[] = [];
+  for (const side of [-1, 1]) {
+    const quill = builder.group(`${side < 0 ? 'left' : 'right'}PrismQuill`, body);
+    quill.position.set(side * 0.64, 1.28, -0.04);
+    const shaft = builder.mesh(`${side < 0 ? 'left' : 'right'}QuillShaft`, new THREE.ConeGeometry(0.045, 1.05, 5), materials.get('lunarSilver'), quill);
+    shaft.rotation.z = side * -0.72;
+    const nib = builder.mesh(`${side < 0 ? 'left' : 'right'}QuillNib`, new THREE.TetrahedronGeometry(0.13, 0), prismLight, quill, false);
+    nib.position.set(side * 0.36, -0.4, -0.18);
+    quills.push(quill);
+  }
+  const indexHalo = builder.mesh('indexHalo', new THREE.TorusKnotGeometry(0.64, 0.025, 72, 7, 2, 3), materials.get('lunarSilver'), body, false);
+  indexHalo.position.y = 1.26;
+  indexHalo.rotation.x = Math.PI / 2;
+
+  addContactShadow(builder, materials, 0.66, 0.58);
+  const hitSocket = addSocket(builder, 'hitSocket', prism, new THREE.Vector3(0, 0, -0.42));
+  const castSocket = addSocket(builder, 'castSocket', voidLens, new THREE.Vector3(0, 0, -0.18));
+  const collision = builder.collision('collisionProxy', new THREE.CapsuleGeometry(0.48, 0.92, 4, 8));
+  collision.position.y = 1.2;
+
+  return builder.finish(collision, { hit: hitSocket, cast: castSocket }, (_delta, elapsed, intensity) => {
+    body.position.y = 0.22 + Math.sin(elapsed * 2.1) * 0.12;
+    prism.rotation.y = elapsed * 0.65;
+    indexHalo.rotation.z = elapsed * 0.42;
+    indexHalo.rotation.y = Math.sin(elapsed * 0.9) * 0.18;
+    pageJoints.forEach((pageJoint, index) => {
+      const angle = elapsed * (index % 2 === 0 ? 0.48 : -0.42) + index * Math.PI * 2 / pageJoints.length;
+      const radius = 0.9 + index % 2 * 0.28;
+      pageJoint.position.set(Math.cos(angle) * radius, 1.18 + Math.sin(angle * 1.8) * 0.48, Math.sin(angle) * radius * 0.68);
+      pageJoint.rotation.set(0.18 + Math.sin(elapsed + index) * 0.12, -angle + Math.PI / 2, Math.sin(elapsed * 1.4 + index) * 0.16);
+    });
+    quills.forEach((quill, index) => { quill.rotation.z = Math.sin(elapsed * 2.6 + index * Math.PI) * 0.1 * intensity; });
+    voidLens.scale.setScalar(0.82 + Math.sin(elapsed * 7.5) * 0.12 + intensity * 0.08);
+  });
+}
+
+export function createThornReliquaryEnemy(materials: MaterialLibrary): AuthoredModel {
+  const builder = new ModelBuilder('enemy.thornReliquary');
+  const body = builder.group('thornReliquaryBody');
+  const sapLight = builder.cloneMaterial(
+    materials.get<THREE.MeshStandardMaterial>('spirit'),
+    'material.thornReliquarySap',
+    (material) => {
+      material.color.set('#9bd94d');
+      material.emissive.set('#286d24');
+      material.emissiveIntensity = 1.2;
+      material.roughness = 0.34;
+    },
+  );
+  const rootMaterial = builder.cloneMaterial(
+    materials.get<THREE.MeshStandardMaterial>('leather'),
+    'material.thornReliquaryRoot',
+    (material) => {
+      material.color.set('#294632');
+      material.roughness = 0.9;
+      material.metalness = 0.04;
+    },
+  );
+  const cageMaterial = builder.cloneMaterial(
+    rootMaterial,
+    'material.thornReliquaryCage',
+    (material) => {
+      material.color.set('#3d6b48');
+      material.wireframe = true;
+    },
+  );
+
+  const heart = builder.mesh('auroraSeedHeart', new THREE.DodecahedronGeometry(0.46, 1), sapLight, body, false);
+  heart.position.y = 1.16;
+  const husk = builder.mesh('reliquaryHusk', new THREE.IcosahedronGeometry(0.75, 1), cageMaterial, body);
+  husk.position.y = 1.15;
+  husk.scale.set(1.12, 1.26, 0.94);
+  // Open the silhouette around the emissive heart with a forward reliquary window.
+  const window = builder.mesh('reliquaryWindow', new THREE.TorusGeometry(0.4, 0.075, 7, 22), materials.get('celestialGold'), body);
+  window.position.set(0, 1.15, -0.68);
+  window.rotation.x = Math.PI / 2;
+  const windowGlow = builder.mesh('reliquaryWindowGlow', new THREE.CircleGeometry(0.31, 18), sapLight, body, false);
+  windowGlow.position.set(0, 1.15, -0.705);
+  windowGlow.rotation.y = Math.PI;
+
+  const rootJoints: THREE.Group[] = [];
+  for (let index = 0; index < 4; index += 1) {
+    const angle = Math.PI * 0.25 + index * Math.PI * 0.5;
+    const root = builder.group(`walkingRootJoint.${index}`, body);
+    root.position.set(Math.sin(angle) * 0.42, 0.82, Math.cos(angle) * 0.42);
+    const knee = new THREE.Vector3(Math.sin(angle) * 0.52, -0.38, Math.cos(angle) * 0.52);
+    const foot = new THREE.Vector3(Math.sin(angle) * 0.94, -0.75, Math.cos(angle) * 0.94);
+    addBeam(builder, root, `walkingRootUpper.${index}`, new THREE.Vector3(), knee, 0.13, rootMaterial, 6);
+    addBeam(builder, root, `walkingRootLower.${index}`, knee, foot, 0.095, rootMaterial, 6);
+    const claw = builder.mesh(`rootClaw.${index}`, new THREE.ConeGeometry(0.12, 0.46, 5), rootMaterial, root);
+    claw.position.copy(foot).add(new THREE.Vector3(Math.sin(angle) * 0.13, -0.04, Math.cos(angle) * 0.13));
+    claw.rotation.z = -angle;
+    rootJoints.push(root);
+  }
+
+  const crown = builder.group('thornCrown', body);
+  crown.position.y = 1.68;
+  const thorns: THREE.Mesh[] = [];
+  for (let index = 0; index < 8; index += 1) {
+    const angle = index / 8 * Math.PI * 2;
+    const thorn = builder.mesh(`crownThorn.${index}`, new THREE.ConeGeometry(0.11, 0.78, 5), index % 2 === 0 ? sapLight : rootMaterial, crown);
+    thorn.position.set(Math.sin(angle) * 0.62, Math.cos(angle * 2) * 0.12, Math.cos(angle) * 0.62);
+    thorn.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(Math.sin(angle) * 0.72, 0.68, Math.cos(angle) * 0.72).normalize());
+    thorns.push(thorn);
+  }
+  const vineRings: THREE.Mesh[] = [];
+  for (let index = 0; index < 2; index += 1) {
+    const vine = builder.mesh(`livingVineRing.${index}`, new THREE.TorusKnotGeometry(0.78 + index * 0.14, 0.035, 64, 6, 2, 3), index === 0 ? rootMaterial : sapLight, body, false);
+    vine.position.y = 1.14;
+    vine.rotation.set(Math.PI / 2 + index * 0.45, index * 0.5, 0);
+    vineRings.push(vine);
+  }
+
+  addContactShadow(builder, materials, 1.02, 0.92);
+  const hitSocket = addSocket(builder, 'hitSocket', heart, new THREE.Vector3(0, 0, -0.38));
+  const castSocket = addSocket(builder, 'castSocket', windowGlow, new THREE.Vector3(0, 0, -0.08));
+  const collision = builder.collision('collisionProxy', new THREE.SphereGeometry(0.86, 10, 7));
+  collision.position.y = 1.02;
+
+  return builder.finish(collision, { hit: hitSocket, cast: castSocket }, (_delta, elapsed, intensity) => {
+    body.position.y = 0.03 + Math.sin(elapsed * 1.45) * 0.025;
+    const heartbeat = 0.9 + Math.sin(elapsed * 4.1) * 0.08 + intensity * 0.04;
+    heart.scale.setScalar(heartbeat);
+    windowGlow.scale.setScalar(0.86 + Math.sin(elapsed * 4.1) * 0.12 + intensity * 0.05);
+    crown.rotation.y = Math.sin(elapsed * 0.72) * 0.16;
+    thorns.forEach((thorn, index) => { thorn.scale.y = 0.84 + Math.sin(elapsed * 2 + index) * 0.1 * intensity; });
+    rootJoints.forEach((root, index) => { root.rotation.z = Math.sin(elapsed * 1.6 + index * Math.PI * 0.5) * 0.035; });
+    vineRings.forEach((vine, index) => {
+      vine.rotation.y = index * 0.5 + elapsed * (index === 0 ? 0.16 : -0.13) * intensity;
+    });
+  });
+}
+
 export function createEnemyModel(variant: EnemyVariant, materials: MaterialLibrary): AuthoredModel {
   switch (variant) {
     case 'wisp':
@@ -936,10 +1300,14 @@ export function createEnemyModel(variant: EnemyVariant, materials: MaterialLibra
     case 'sentinel':
     case 'astralSentinel': return createAstralSentinelEnemy(materials);
     case 'seer':
-    case 'eclipseChorister': return createEclipseChoristerEnemy(materials);
     case 'rimeStalker': return createRimeStalkerEnemy(materials);
     case 'ashenInitiate': return createAshenInitiateEnemy(materials);
     case 'astralLancer': return createAstralLancerEnemy(materials);
+    case 'eclipseChorister': return createEclipseChoristerEnemy(materials);
+    case 'emberPenitent': return createEmberPenitentEnemy(materials);
+    case 'drownedCantor': return createDrownedCantorEnemy(materials);
+    case 'prismScribe': return createPrismScribeEnemy(materials);
+    case 'thornReliquary': return createThornReliquaryEnemy(materials);
     case 'orreryCastellan': return createOrreryCastellanEnemy(materials);
   }
 }

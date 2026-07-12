@@ -10,6 +10,7 @@ export class CombatProjectile {
   readonly radius: number;
   active = true;
   lifetime: number;
+  private surfaceHeight = 0;
 
   private readonly geometry: THREE.BufferGeometry;
   private readonly ringGeometry: THREE.BufferGeometry;
@@ -48,6 +49,7 @@ export class CombatProjectile {
     ring.rotation.x = Math.PI / 2;
     this.group.add(core, ring);
     this.group.position.copy(position);
+    this.surfaceHeight = position.y - 0.78;
     this.previousPosition.copy(position);
     this.velocity.copy(direction).setY(0).normalize().multiplyScalar(speed);
   }
@@ -56,7 +58,7 @@ export class CombatProjectile {
     if (!this.active) return;
     this.previousPosition.copy(this.group.position);
     this.group.position.addScaledVector(this.velocity, delta);
-    this.group.position.y = 0.78 + Math.sin(elapsed * 16 + this.group.id) * 0.055;
+    this.group.position.y = this.surfaceHeight + 0.78 + Math.sin(elapsed * 16 + this.group.id) * 0.055;
     this.group.rotation.y += delta * 7;
     this.group.rotation.z += delta * 4;
     this.lifetime -= delta;
@@ -68,6 +70,12 @@ export class CombatProjectile {
   deactivate(): void {
     this.active = false;
     this.group.visible = false;
+  }
+
+  setSurfaceHeight(height: number): void {
+    if (!Number.isFinite(height)) return;
+    this.surfaceHeight = height;
+    this.group.position.y = height + 0.78;
   }
 
   dispose(): void {

@@ -47,7 +47,7 @@
             <span>
               <small>School ledger</small>
               <strong id="front-profile-name">Unnamed Pilgrim</strong>
-              <em id="front-profile-detail">Young initiate · Deep hood · Crescent staff</em>
+              <em id="front-profile-detail">Lunar Penitent · Lunar Dart + Aurora Veil · Crescent staff</em>
             </span>
           </div>
 
@@ -56,7 +56,7 @@
               <span>Begin pilgrimage</span><small>Cross into the moonless tundra</small>
             </button>
             <button id="shape-pilgrim" class="front-action" type="button" data-ui-sound="confirm">
-              <span>Shape the pilgrim</span><small>Name and attire your sorcerer</small>
+              <span>Shape the pilgrim</span><small>Choose origin, arts, and attire</small>
             </button>
             <button id="front-settings-button" class="front-action" type="button" data-ui-sound="confirm">
               <span>Settings</span><small>Sound and reduced motion</small>
@@ -85,10 +85,12 @@
               <div><dt>Move</dt><dd><kbd>WASD</kbd> / arrows</dd></div>
               <div><dt>Dodge</dt><dd><kbd>Space</kbd> / Shift</dd></div>
               <div><dt>Melee</dt><dd><kbd>J</kbd> / left click</dd></div>
-              <div><dt>Lunar sorcery</dt><dd><kbd>Q</kbd> / right click</dd></div>
-              <div><dt>Aurora light</dt><dd><kbd>E</kbd> / middle click</dd></div>
+              <div><dt>First sorcery</dt><dd><kbd>Q</kbd> / right click</dd></div>
+              <div><dt>Second sorcery</dt><dd><kbd>E</kbd> / middle click</dd></div>
+              <div><dt>Third sorcery</dt><dd><kbd>3</kbd></dd></div>
               <div><dt>Lock target</dt><dd><kbd>Tab</kbd></dd></div>
               <div><dt>Interact</dt><dd><kbd>F</kbd></dd></div>
+              <div><dt>Star Atlas</dt><dd><kbd>I</kbd></dd></div>
               <div><dt>Pause</dt><dd><kbd>Esc</kbd> / P</dd></div>
             </dl>
             <p>On touch screens, the same intentions are mapped to the astral stick and action seals.</p>
@@ -119,7 +121,7 @@
               <div>
                 <p class="eyebrow">School of the spiral spire</p>
                 <h2 id="creator-title">Shape the pilgrim</h2>
-                <p id="creator-intro">Choose the mortal form that will carry the school's final light.</p>
+                <p id="creator-intro">Choose the origin, first sorceries, and mortal form that will carry the school's final light.</p>
               </div>
               <button id="creator-back" class="creator-back" type="button" data-ui-sound="cancel">Back</button>
             </header>
@@ -140,6 +142,33 @@
             </label>
 
             <div class="creator-fields">
+              <fieldset class="creator-build-field creator-build-field--origin" aria-describedby="origin-help">
+                <legend>Origin</legend>
+                <p id="origin-help" class="creator-field-help">Your first vow shapes the strengths you carry into every path.</p>
+                <div class="creator-options creator-options--two creator-options--origins">
+                  <label class="creator-option creator-option--origin"><input type="radio" name="origin" value="lunar-penitent" checked /><span><strong>Lunar Penitent</strong><small>Spell power, focus, and discovery</small></span></label>
+                  <label class="creator-option creator-option--origin"><input type="radio" name="origin" value="aurora-votary" /><span><strong>Aurora Votary</strong><small>Vitality, restoration, and warding</small></span></label>
+                  <label class="creator-option creator-option--origin"><input type="radio" name="origin" value="comet-warden" /><span><strong>Comet Warden</strong><small>Melee force, stamina, and speed</small></span></label>
+                  <label class="creator-option creator-option--origin"><input type="radio" name="origin" value="eclipse-outcast" /><span><strong>Eclipse Outcast</strong><small>Swift casting and rare finds, but fragile</small></span></label>
+                </div>
+              </fieldset>
+
+              <fieldset
+                id="starting-ability-fieldset"
+                class="creator-build-field creator-build-field--abilities"
+                aria-describedby="starting-ability-help starting-ability-error"
+              >
+                <legend>Starting sorceries <output id="starting-ability-count" aria-live="polite">2 of 2 chosen</output></legend>
+                <p id="starting-ability-help" class="creator-field-help">Choose exactly two distinct arts. They become your first two equipped abilities.</p>
+                <div class="creator-options creator-options--two creator-options--abilities">
+                  <label class="creator-option creator-option--ability"><input type="checkbox" name="startingAbilities" value="lunar-dart" checked /><span><strong>Lunar Dart</strong><small>Quick piercing moon-silver bolt</small></span></label>
+                  <label class="creator-option creator-option--ability"><input type="checkbox" name="startingAbilities" value="aurora-veil" checked /><span><strong>Aurora Veil</strong><small>Restorative fan of aurora light</small></span></label>
+                  <label class="creator-option creator-option--ability"><input type="checkbox" name="startingAbilities" value="comet-lance" /><span><strong>Comet Lance</strong><small>Heavy lance that staggers armor</small></span></label>
+                  <label class="creator-option creator-option--ability"><input type="checkbox" name="startingAbilities" value="eclipse-step" /><span><strong>Eclipse Step</strong><small>Shadow step with an echoing nova</small></span></label>
+                </div>
+                <p id="starting-ability-error" class="creator-field-error" role="alert" hidden></p>
+              </fieldset>
+
               <fieldset>
                 <legend>Life stage</legend>
                 <div class="creator-options creator-options--two">
@@ -239,6 +268,19 @@
           <button id="audio-toggle" class="icon-button" type="button" data-audio-toggle data-ui-sound="confirm" aria-label="Mute sound" aria-pressed="false">
             <span data-audio-icon aria-hidden="true">◖</span>
           </button>
+          <button
+            id="atlas-button"
+            class="icon-button atlas-button"
+            type="button"
+            data-game-intent="pause"
+            data-ui-action="pause"
+            data-atlas-action="open"
+            aria-label="Open Star Atlas"
+            aria-haspopup="dialog"
+            aria-controls="star-atlas-layer"
+          >
+            <span aria-hidden="true">✣</span><i id="atlas-notice" aria-hidden="true"></i>
+          </button>
           <button id="settings-button" class="icon-button" type="button" data-game-intent="pause" data-ui-action="settings" aria-label="Open settings">
             <span aria-hidden="true">⚙</span>
           </button>
@@ -287,6 +329,13 @@
           <span><small id="prompt-action">Interact</small><strong id="prompt-label">Read the weathered inscription</strong></span>
         </div>
 
+        <aside id="route-choice-prompt" class="route-choice-prompt" aria-labelledby="route-choice-title" aria-live="polite" hidden>
+          <p class="eyebrow">The road divides</p>
+          <h2 id="route-choice-title">Choose a path</h2>
+          <p id="route-choice-detail">Each passage leaves a different mark.</p>
+          <div id="route-choice-options" class="route-choice-options"></div>
+        </aside>
+
         <div id="discovery-overlay" class="discovery-overlay" role="status" hidden>
           <div class="discovery-overlay__orbit" aria-hidden="true"><i></i><span>✦</span></div>
           <div>
@@ -305,6 +354,7 @@
           <p>Return to the silent tundra, or attend to the instruments of your journey.</p>
           <div class="menu-actions">
             <button class="rune-button rune-button--primary" type="button" data-game-intent="pause" data-ui-action="resume">Resume</button>
+            <button class="rune-button" type="button" data-atlas-action="open" aria-haspopup="dialog" aria-controls="star-atlas-layer">Star Atlas</button>
             <button class="rune-button" type="button" data-ui-action="settings" data-ui-sound="confirm">Settings</button>
             <button class="rune-button" type="button" data-game-intent="restart" data-ui-action="restart" data-ui-sound="cancel">Restart pilgrimage</button>
           </div>
@@ -348,6 +398,68 @@
         </article>
       </section>
 
+      <section id="star-atlas-layer" class="atlas-layer" aria-hidden="true" hidden>
+        <button class="atlas-backdrop" type="button" data-atlas-action="close" tabindex="-1" aria-label="Close Star Atlas"></button>
+        <article id="star-atlas-panel" class="atlas-panel" role="dialog" aria-modal="true" aria-labelledby="atlas-title" aria-describedby="atlas-subtitle">
+          <header class="atlas-header">
+            <div class="atlas-heading">
+              <p class="eyebrow">Living constellation</p>
+              <h2 id="atlas-title">Star Atlas</h2>
+              <p id="atlas-subtitle"><strong id="atlas-origin">Lunar Penitent</strong><span> · Shape the pilgrim carried between the failing heavens.</span></p>
+            </div>
+            <div class="atlas-currencies" aria-label="Progression currencies">
+              <span><small>Level</small><strong id="atlas-level">1</strong></span>
+              <span><small>Stardust</small><strong id="atlas-stardust">0</strong></span>
+              <span><small>Insight</small><strong id="atlas-insight">0</strong></span>
+            </div>
+            <button id="atlas-close" class="atlas-close" type="button" data-atlas-action="close" aria-label="Close Star Atlas">×</button>
+            <div class="atlas-experience" aria-label="Experience progress">
+              <span><small id="atlas-experience-label">0 / 100 experience</small><i id="atlas-experience-bar" style="--atlas-progress: 0"></i></span>
+            </div>
+          </header>
+
+          <section id="atlas-reward" class="atlas-reward" aria-labelledby="atlas-reward-title" aria-live="polite" hidden>
+            <div class="atlas-reward__heading">
+              <div>
+                <p class="eyebrow">Memory made manifest</p>
+                <h3 id="atlas-reward-title">Choose one reward</h3>
+                <p id="atlas-reward-detail">Only one shape can cross into the waking world.</p>
+              </div>
+              <button class="atlas-text-button" type="button" data-progression-action="dismiss-reward" aria-label="Close the Atlas and choose this reward later">Defer memory</button>
+            </div>
+            <div id="atlas-reward-choices" class="atlas-reward-choices"></div>
+          </section>
+
+          <nav class="atlas-tabs" role="tablist" aria-label="Star Atlas sections">
+            <button id="atlas-tab-gear" class="atlas-tab" type="button" role="tab" aria-selected="true" aria-controls="atlas-panel-gear" data-atlas-tab="gear">Gear</button>
+            <button id="atlas-tab-sorceries" class="atlas-tab" type="button" role="tab" aria-selected="false" aria-controls="atlas-panel-sorceries" data-atlas-tab="sorceries" tabindex="-1">Sorceries</button>
+            <button id="atlas-tab-constellation" class="atlas-tab" type="button" role="tab" aria-selected="false" aria-controls="atlas-panel-constellation" data-atlas-tab="constellation" tabindex="-1">Constellation</button>
+          </nav>
+
+          <div class="atlas-body">
+            <section id="atlas-panel-gear" class="atlas-section" role="tabpanel" aria-labelledby="atlas-tab-gear" data-atlas-panel="gear">
+              <div class="atlas-section__heading"><div><p class="eyebrow">Relics borne</p><h3>Inventory &amp; equipment</h3></div><span id="atlas-inventory-count">0 / 36</span></div>
+              <div id="atlas-equipment" class="atlas-equipment" aria-label="Equipped items"></div>
+              <div id="atlas-inventory" class="atlas-card-grid" aria-label="Inventory items"></div>
+            </section>
+
+            <section id="atlas-panel-sorceries" class="atlas-section" role="tabpanel" aria-labelledby="atlas-tab-sorceries" data-atlas-panel="sorceries" hidden>
+              <div class="atlas-section__heading"><div><p class="eyebrow">Arts remembered</p><h3>Three-slot loadout</h3></div><span id="atlas-ability-count">0 / 18</span></div>
+              <div id="atlas-loadout" class="atlas-loadout" aria-label="Equipped sorceries"></div>
+              <div id="atlas-abilities" class="atlas-card-grid" aria-label="Known sorceries"></div>
+            </section>
+
+            <section id="atlas-panel-constellation" class="atlas-section" role="tabpanel" aria-labelledby="atlas-tab-constellation" data-atlas-panel="constellation" hidden>
+              <div class="atlas-section__heading"><div><p class="eyebrow">Specialization</p><h3>Constellation paths</h3></div><span id="atlas-spec-currency">0 insight</span></div>
+              <div id="atlas-specs" class="atlas-specs"></div>
+              <div class="atlas-modifiers"><h4>Current celestial influence</h4><div id="atlas-modifiers" class="atlas-modifier-list"></div></div>
+              <div class="atlas-path-marks"><h4>Chosen paths</h4><div id="atlas-path-marks" class="atlas-path-mark-list"></div></div>
+            </section>
+          </div>
+          <p id="atlas-status" class="atlas-status" role="status" aria-live="polite"></p>
+        </article>
+      </section>
+
       <nav id="touch-controls" aria-label="Touch controls">
         <div class="touch-controls__left">
           <div id="touch-stick" aria-label="Movement stick">
@@ -366,6 +478,9 @@
           </button>
           <button id="aurora-button" class="touch-action touch-action--aurora" type="button" data-game-intent="aurora" aria-label="Cast aurora light">
             <span>✦</span><small>Aurora</small>
+          </button>
+          <button id="ability3-button" class="touch-action touch-action--ability3" type="button" data-game-intent="ability3" aria-label="Cast third equipped sorcery">
+            <span>3</span><small>Third art</small>
           </button>
           <button id="dash-button" class="touch-action touch-action--dodge" type="button" data-game-intent="dodge" aria-label="Dodge">
             <span>↝</span><small>Dodge</small>

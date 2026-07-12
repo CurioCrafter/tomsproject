@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { RouteBiomeId } from '../game/content/RouteTypes';
 import {
   createProceduralTextures,
   disposeProceduralTextures,
@@ -35,6 +36,7 @@ export type MaterialLibraryOptions = {
 export class MaterialLibrary {
   readonly textures: ProceduralTextureSet;
   readonly roles: MaterialRoles;
+  readonly biomeFloors: Readonly<Record<RouteBiomeId, THREE.MeshStandardMaterial>>;
   private readonly ownsTextures: boolean;
   private readonly generatedTextures = new Set<THREE.Texture>();
   private disposed = false;
@@ -53,6 +55,10 @@ export class MaterialLibrary {
       'generatedMidnightStarweave',
       2.5,
     );
+    const drownedStone = this.loadGeneratedTexture('/assets/textures/drowned-cloister-stone.webp', 'generatedDrownedCloisterStone', 3);
+    const verdantStone = this.loadGeneratedTexture('/assets/textures/verdant-cathedral-stone.webp', 'generatedVerdantCathedralStone', 3);
+    const emberStone = this.loadGeneratedTexture('/assets/textures/ember-basilica-stone.webp', 'generatedEmberBasilicaStone', 3);
+    const amethystStone = this.loadGeneratedTexture('/assets/textures/amethyst-archive-stone.webp', 'generatedAmethystArchiveStone', 3);
 
     this.roles = {
       blackSlate: new THREE.MeshStandardMaterial({
@@ -188,10 +194,29 @@ export class MaterialLibrary {
     this.roles.aurora.forceSinglePass = true;
     this.roles.glass.forceSinglePass = true;
     this.roles.runeLight.forceSinglePass = true;
+    this.biomeFloors = Object.freeze({
+      'moonless-tundra': this.roles.blackSlate as THREE.MeshStandardMaterial,
+      'drowned-cloister': new THREE.MeshStandardMaterial({
+        name: 'material.drownedCloisterStone', color: '#799aaa', map: drownedStone, roughness: 0.9, metalness: 0.09,
+      }),
+      'verdant-cathedral': new THREE.MeshStandardMaterial({
+        name: 'material.verdantCathedralStone', color: '#78a987', map: verdantStone, roughness: 0.88, metalness: 0.06,
+      }),
+      'ember-basilica': new THREE.MeshStandardMaterial({
+        name: 'material.emberBasilicaStone', color: '#a57663', map: emberStone, roughness: 0.86, metalness: 0.11,
+      }),
+      'amethyst-archives': new THREE.MeshStandardMaterial({
+        name: 'material.amethystArchiveStone', color: '#9a82bd', map: amethystStone, roughness: 0.78, metalness: 0.16,
+      }),
+    });
   }
 
   get<T extends THREE.Material = THREE.Material>(role: MaterialRole): T {
     return this.roles[role] as T;
+  }
+
+  getBiomeFloor(biome: RouteBiomeId = 'moonless-tundra'): THREE.MeshStandardMaterial {
+    return this.biomeFloors[biome];
   }
 
   setAnisotropy(anisotropy: number): void {
@@ -205,7 +230,7 @@ export class MaterialLibrary {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    new Set(Object.values(this.roles)).forEach((material) => material.dispose());
+    new Set([...Object.values(this.roles), ...Object.values(this.biomeFloors)]).forEach((material) => material.dispose());
     this.generatedTextures.forEach((texture) => texture.dispose());
     if (this.ownsTextures) disposeProceduralTextures(this.textures);
   }

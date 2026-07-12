@@ -7,9 +7,29 @@ export type RouteSectionKind =
   | 'court'
   | 'refuge'
   | 'causeway'
+  | 'open-area'
+  | 'stair'
+  | 'cathedral'
+  | 'crypt'
+  | 'archive'
+  | 'garden'
   | 'boss-arena';
 
-export type RouteRelicKind = 'moon' | 'aurora' | 'constellation';
+export type RouteBiomeId =
+  | 'moonless-tundra'
+  | 'ember-basilica'
+  | 'drowned-cloister'
+  | 'amethyst-archives'
+  | 'verdant-cathedral';
+
+export type RouteRelicKind =
+  | 'moon'
+  | 'aurora'
+  | 'constellation'
+  | 'ember'
+  | 'tide'
+  | 'memory'
+  | 'verdant';
 
 export type RouteEnemyKind =
   | 'wisp'
@@ -18,6 +38,10 @@ export type RouteEnemyKind =
   | 'ashenInitiate'
   | 'astralLancer'
   | 'eclipseChorister'
+  | 'emberPenitent'
+  | 'drownedCantor'
+  | 'prismScribe'
+  | 'thornReliquary'
   | 'orreryCastellan'
   | 'eclipseArchon';
 
@@ -55,17 +79,31 @@ export type RouteAnchorDefinition = {
   readonly position: Vec2Tuple;
 };
 
+export type RouteElevationProfile = Readonly<{
+  /** Height at the entry side, following cameraForward. */
+  start: number;
+  /** Height at the exit side, following cameraForward. */
+  end: number;
+}>;
+
 export type RouteSectionDefinition = {
   readonly id: string;
   readonly name: string;
   readonly order: number;
   readonly kind: RouteSectionKind;
+  readonly biome?: RouteBiomeId;
+  readonly elevation?: RouteElevationProfile;
   readonly safe: boolean;
   readonly connectsTo: readonly string[];
   readonly walkable: readonly RouteShape[];
   readonly cameraForward: Vec2Tuple;
   readonly enemyAnchors: readonly RouteAnchorDefinition[];
 };
+
+export type RouteBranchSectionDefinition = Omit<RouteSectionDefinition, 'order'> & Readonly<{
+  readonly choiceId: string;
+  readonly optionId: string;
+}>;
 
 export type GateDefinition = {
   readonly id: string;
@@ -101,6 +139,47 @@ export type EncounterDefinition = {
   readonly objective: string;
 };
 
+export type RouteChoiceConsequence = Readonly<{
+  readonly affinity: 'celestial' | 'wrathful' | 'mercy';
+  readonly affinityDelta: number;
+  readonly lootBias: 'weapon' | 'catalyst' | 'robe' | 'charm';
+  readonly enemyPowerMultiplier: number;
+  readonly rewardLabel: string;
+}>;
+
+export type RouteChoiceOptionDefinition = Readonly<{
+  readonly id: string;
+  readonly label: string;
+  readonly description: string;
+  readonly sectionIds: readonly string[];
+  readonly entryGateId: string;
+  readonly exitGateId: string;
+  readonly encounterId: string;
+  readonly consequence: RouteChoiceConsequence;
+}>;
+
+export type RouteChoiceDefinition = Readonly<{
+  readonly id: string;
+  readonly name: string;
+  readonly sectionId: string;
+  readonly position: Vec2Tuple;
+  readonly activationRadius: number;
+  readonly prompt: string;
+  readonly directGateId: string;
+  readonly options: readonly [RouteChoiceOptionDefinition, RouteChoiceOptionDefinition];
+}>;
+
+export type BranchEncounterDefinition = Readonly<{
+  readonly id: string;
+  readonly choiceId: string;
+  readonly optionId: string;
+  readonly name: string;
+  readonly sectionIds: readonly string[];
+  readonly activation: RouteShape;
+  readonly spawns: readonly EnemySpawnDefinition[];
+  readonly objective: string;
+}>;
+
 export type CheckpointDefinition = {
   readonly id: string;
   readonly name: string;
@@ -122,6 +201,8 @@ export type RouteStartDefinition = {
 export type RouteRequirements = {
   readonly encounterCount: number;
   readonly minimumBridgeSections: number;
+  readonly minimumBiomeCount?: number;
+  readonly minimumChoiceCount?: number;
   readonly relicOrder: readonly RouteRelicKind[];
   readonly enemyKinds: readonly RouteEnemyKind[];
 };
@@ -133,6 +214,9 @@ export type CampaignRouteDefinition = {
   readonly start: RouteStartDefinition;
   readonly requirements: RouteRequirements;
   readonly sections: readonly RouteSectionDefinition[];
+  readonly branchSections?: readonly RouteBranchSectionDefinition[];
+  readonly choices?: readonly RouteChoiceDefinition[];
+  readonly branchEncounters?: readonly BranchEncounterDefinition[];
   readonly gates: readonly GateDefinition[];
   readonly checkpoints: readonly CheckpointDefinition[];
   readonly encounters: readonly EncounterDefinition[];

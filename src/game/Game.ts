@@ -20,6 +20,7 @@ import { CameraRig } from '../systems/CameraRig';
 import { CollisionSystem, type CircleObstacle } from '../systems/CollisionSystem';
 import { DebugTools, type DebugTuning } from '../systems/DebugTools';
 import { EncounterDirector } from '../systems/EncounterDirector';
+import { BranchDirector } from '../systems/BranchDirector';
 import { Hud } from '../systems/Hud';
 import { VfxSystem } from '../systems/VfxSystem';
 import { disposeObject3D } from '../utils/dispose';
@@ -31,8 +32,21 @@ import {
 } from './CharacterProfile';
 import { appearanceFromProfile, appearanceSignature } from './CharacterAppearance';
 import type { FrontEndIntentDetail } from '../ui/FrontEndController';
-import { FIRMAMENT_ROUTE, FIRMAMENT_ROUTE_WALKABLE } from './content/FirmamentRoute';
-import type { EncounterDefinition, RouteEnemyKind, RouteSectionDefinition, RouteShape } from './content/RouteTypes';
+import {
+  FIRMAMENT_ROUTE,
+  FIRMAMENT_ROUTE_ALL_ENCOUNTERS,
+  FIRMAMENT_ROUTE_ALL_SECTIONS,
+  FIRMAMENT_ROUTE_ALL_WALKABLE,
+} from './content/FirmamentRoute';
+import { routeElevationAt, type AnyRouteSection } from './content/RouteGeometry';
+import type {
+  EncounterDefinition,
+  GateStateSnapshot,
+  RouteEnemyKind,
+  RouteShape,
+} from './content/RouteTypes';
+import { ProgressionSystem } from './progression/ProgressionSystem';
+import type { SpecBranch } from './progression/ProgressionTypes';
 
 const ARENA: ArenaBounds = {
   halfWidth: 30,
@@ -75,6 +89,11 @@ type TestHooks = {
   claimAvailableCheckpoint: () => void;
   showEncounter: (encounterId: string) => void;
   showSection: (sectionId: string) => void;
+  chooseBranch: (choiceId: string, optionId: string) => void;
+  activateBranchEncounter: (encounterId: string) => void;
+  defeatActiveBranchEncounter: () => void;
+  claimReward: (choiceIndex?: number) => void;
+  allocateSpec: (branch: SpecBranch) => void;
   victoryTrade: () => void;
 };
 
@@ -82,6 +101,15 @@ type RuntimeWindow = Window & {
   __THREE_GAME_DIAGNOSTICS__?: unknown;
   __CELESTIAL_GAME_TEST__?: TestHooks;
 };
+
+type RouteChoiceIntentDetail = Readonly<{ choiceId?: string; optionId?: string }>;
+type ProgressionIntentDetail = Readonly<{
+  action?: 'claim-reward' | 'equip-item' | 'equip-ability' | 'upgrade-item' | 'upgrade-ability' | 'allocate-spec' | 'dismiss-reward';
+  id?: string;
+  offerId?: string;
+  slot?: number;
+  branch?: SpecBranch;
+}>;
 
 const RELIC_DATA: ReadonlyArray<{ kind: RelicKind; position: readonly [number, number]; checkpointId: string }> =
   FIRMAMENT_ROUTE.checkpoints.map((checkpoint) => ({
@@ -100,6 +128,7 @@ export class Game {
   private readonly player = new Player();
   private readonly collision = new CollisionSystem();
   private readonly encounterDirector = new EncounterDirector(FIRMAMENT_ROUTE);
+  private readonly branchDirector = new BranchDirector(FIRMAMENT_ROUTE);
   private readonly audio = new AudioSystem();
   private readonly hud = new Hud();
   private readonly cameraRig = new CameraRig(this.camera);
@@ -154,6 +183,7 @@ export class Game {
 
   private readonly landmarks: THREE.Group;
   private characterProfile: CharacterProfile;
+  private readonly progression: ProgressionSystem;
   private boss: Enemy;
   private midpointBoss!: Enemy;
   private lockedTarget: Enemy | null = null;
@@ -168,6 +198,7 @@ export class Game {
   private damageDealt = 0;
   private damageTaken = 0;
   private disposed = false;
+  private nearbyChoiceId: string | null = null;
 
   private readonly onFrontEndIntent = (event: Event): void => {
     const detail = (event as CustomEvent<FrontEndIntentDetail>).detail;
@@ -181,6 +212,57 @@ export class Game {
     }
   };
 
+  private readonly onRouteChoiceIntent = (event: Event): void => {
+    const detail = (event as CustomEvent<RouteChoiceIntentDetail>).detail;
+    if (!detail?.choiceId || !detail.optionId) return;
+    if (this.phase !== 'exploration' || this.nearbyChoiceId !== detail.choiceId) return;
+    const option = this.branchDirector.selectOption(detail.choiceId, detail.optionId);
+    if (!option) return;
+    const choice = (FIRMAMENT_ROUTE.choices ?? []).find((candidate) => candidate.id === detail.choiceId);
+    this.progression.recordBranchSelection({
+      choiceId: detail.choiceId,
+      optionId: option.id,
+      label: option.label,
+      consequence: option.consequence,
+    });
+    this.affinity[option.consequence.affinity] = Math.min(
+      1,
+      this.affinity[option.consequence.affinity] + option.consequence.affinityDelta,
+    );
+    this.applyProgressionBuild();
+    this.nearbyChoiceId = null;
+    this.syncRouteState();
+    this.hud.showDiscovery({
+      id: `route-choice-${detail.choiceId}`,
+      visible: true,
+      kicker: choice?.name ?? 'A path is chosen',
+      title: option.label,
+      detail: option.consequence.rewardLabel,
+      duration: 2200,
+    });
+    this.emitAudio('confirm', 0.9);
+    this.publishDiagnostics(true);
+  };
+
+  private readonly onProgressionIntent = (event: Event): void => {
+    const detail = (event as CustomEvent<ProgressionIntentDetail>).detail;
+    if (!detail?.action) return;
+    if (this.phase !== 'paused') return;
+    let changed = false;
+    if (detail.action === 'claim-reward' && detail.offerId && detail.id) {
+      changed = Boolean(this.progression.claimReward(detail.offerId, detail.id));
+    } else if (detail.action === 'equip-item' && detail.id) changed = this.progression.equipItem(detail.id);
+    else if (detail.action === 'equip-ability' && detail.id && detail.slot !== undefined) changed = this.progression.equipAbility(detail.id, detail.slot);
+    else if (detail.action === 'upgrade-item' && detail.id) changed = this.progression.upgradeItem(detail.id);
+    else if (detail.action === 'upgrade-ability' && detail.id) changed = this.progression.upgradeAbility(detail.id);
+    else if (detail.action === 'allocate-spec' && detail.branch) changed = this.progression.allocateSpec(detail.branch);
+    else if (detail.action === 'dismiss-reward') changed = this.progression.dismissOffer();
+    if (!changed) return;
+    this.applyProgressionBuild();
+    this.emitAudio(detail.action.startsWith('upgrade') ? 'checkpoint' : 'confirm', 0.7);
+    this.publishDiagnostics(true);
+  };
+
   constructor(
     private readonly canvas: HTMLCanvasElement,
     initialProfile: CharacterProfile = DEFAULT_CHARACTER_PROFILE,
@@ -189,8 +271,10 @@ export class Game {
     this.renderer.toneMappingExposure = this.tuning.exposure;
     this.materials.setAnisotropy(Math.min(8, this.renderer.capabilities.getMaxAnisotropy()));
     this.characterProfile = sanitizeCharacterProfile(initialProfile);
+    this.progression = new ProgressionSystem(this.characterProfile);
     this.player.useAuthoredModel(createSorcererModel(this.materials, appearanceFromProfile(this.characterProfile)));
     this.applyCharacterProfile(this.characterProfile);
+    this.applyProgressionBuild(false);
 
     const stick = this.getElement('#touch-stick');
     const knob = this.getElement('#touch-knob');
@@ -206,13 +290,16 @@ export class Game {
     this.createScene();
     this.createRelics();
     this.boss = this.createEnemies();
-    this.collision.configureRouteCollision(FIRMAMENT_ROUTE_WALKABLE, FIRMAMENT_ROUTE.gates, this.encounterDirector.getSnapshot().gates);
+    this.collision.configureRouteCollision(FIRMAMENT_ROUTE_ALL_WALKABLE, FIRMAMENT_ROUTE.gates, this.combinedGateStates());
+    this.syncRouteState();
     this.player.restoreAt(START_POSITION);
     this.hud.setTarget(PROGRESSION_TARGET);
     this.cameraRig.setOcclusionRoots([this.world.foregroundLayer, this.world.midgroundLayer, this.world.farLayer]);
     this.cameraRig.snapTo(this.player.group.position);
     resizeRenderer(this.renderer, this.camera, this.tuning.maxDpr);
     window.addEventListener('celestial-front-end-intent', this.onFrontEndIntent);
+    window.addEventListener('celestial-route-choice-intent', this.onRouteChoiceIntent);
+    window.addEventListener('celestial-progression-intent', this.onProgressionIntent);
     this.installTestHooks();
     this.publishDiagnostics(true);
   }
@@ -226,6 +313,8 @@ export class Game {
     this.disposed = true;
     this.loop.stop();
     window.removeEventListener('celestial-front-end-intent', this.onFrontEndIntent);
+    window.removeEventListener('celestial-route-choice-intent', this.onRouteChoiceIntent);
+    window.removeEventListener('celestial-progression-intent', this.onProgressionIntent);
     this.input.dispose();
     this.audio.dispose();
     this.hud.dispose();
@@ -317,6 +406,20 @@ export class Game {
     this.player.useAuthoredModel(createSorcererModel(this.materials, appearanceFromProfile(next)));
   }
 
+  private applyProgressionBuild(preserveResourceRatios = true): void {
+    const snapshot = this.progression.getSnapshot();
+    this.player.applyBuild(snapshot.modifiers, preserveResourceRatios);
+    const itemName = (slot: keyof typeof snapshot.equippedItems): string | undefined => {
+      const id = snapshot.equippedItems[slot];
+      return id ? snapshot.inventory.find((item) => item.id === id)?.name : undefined;
+    };
+    this.player.setEquipment({
+      melee: itemName('weapon') ?? this.player.equipment.melee,
+      catalyst: itemName('catalyst') ?? this.player.equipment.catalyst,
+      armor: itemName('robe') ?? this.player.equipment.armor,
+    });
+  }
+
   private beginPilgrimage(profile: CharacterProfile): void {
     this.applyCharacterProfile(profile);
     this.restartFullRun();
@@ -356,10 +459,43 @@ export class Game {
     });
   }
 
+  private onBranchEncounterActivated(encounterId: string): void {
+    const encounter = (FIRMAMENT_ROUTE.branchEncounters ?? []).find((candidate) => candidate.id === encounterId);
+    if (!encounter) return;
+    this.syncRouteState();
+    for (const spawn of encounter.spawns) {
+      const enemy = this.enemyBySpawnId.get(spawn.id);
+      if (!enemy) continue;
+      const delay = 'wakeDelaySeconds' in spawn ? Math.max(0, spawn.wakeDelaySeconds ?? 0) : 0;
+      if (delay > 0) this.enemyWakeAt.set(enemy, this.elapsed + delay);
+      else enemy.awaken();
+    }
+    const elevation = routeElevationAt(FIRMAMENT_ROUTE, encounter.activation.center);
+    this.vfx.emitCelestialRestoration(
+      new THREE.Vector3(encounter.activation.center[0], elevation, encounter.activation.center[1]),
+      1.45,
+    );
+    this.hud.showDiscovery({
+      id: `branch-encounter-${encounter.id}`,
+      visible: true,
+      kicker: 'The chosen path answers',
+      title: encounter.name,
+      detail: encounter.objective,
+      duration: 1900,
+    });
+    this.emitAudio('boss-awaken', 0.65);
+  }
+
   private syncRouteState(): void {
-    const snapshot = this.encounterDirector.getSnapshot();
-    this.collision.syncGateStates(snapshot.gates);
-    this.world.setGateStates(snapshot.gates);
+    const gates = this.combinedGateStates();
+    this.collision.syncGateStates(gates);
+    this.world.setGateStates(gates);
+  }
+
+  private combinedGateStates(): readonly GateStateSnapshot[] {
+    const gates = new Map(this.encounterDirector.getSnapshot().gates.map((gate) => [gate.id, gate.state] as const));
+    this.branchDirector.getGateOverrides().forEach((gate) => gates.set(gate.id, gate.state));
+    return FIRMAMENT_ROUTE.gates.map((gate) => ({ id: gate.id, state: gates.get(gate.id) ?? gate.initialState }));
   }
 
   private getActiveBoss(): Enemy | null {
@@ -380,11 +516,20 @@ export class Game {
       this.player.velocity,
       this.player.radius,
     );
-    const activatedEncounterId = this.encounterDirector.activateNextEncounterAt(
-      [this.player.group.position.x, this.player.group.position.z],
-      this.player.radius,
-    );
+    const playerPoint: readonly [number, number] = [this.player.group.position.x, this.player.group.position.z];
+    this.player.setGroundHeight(routeElevationAt(FIRMAMENT_ROUTE, playerPoint));
+    const availableChoice = !this.encounterDirector.activeEncounter && !this.branchDirector.activeEncounter
+      ? this.branchDirector.findAvailableChoiceAt(playerPoint, this.player.radius)
+      : null;
+    this.nearbyChoiceId = availableChoice?.id ?? null;
+    const activatedEncounterId = this.branchDirector.activeEncounter
+      ? null
+      : this.encounterDirector.activateNextEncounterAt(playerPoint, this.player.radius);
     if (activatedEncounterId) this.onEncounterActivated(activatedEncounterId);
+    const activatedBranchEncounterId = this.encounterDirector.activeEncounter
+      ? null
+      : this.branchDirector.activateSelectedEncounterAt(playerPoint, this.player.radius);
+    if (activatedBranchEncounterId) this.onBranchEncounterActivated(activatedBranchEncounterId);
     if (!wasDodging && this.player.isDodging) {
       this.vfx.emitDodge(this.player.group.position, this.player.velocity, 1.1);
       this.emitAudio('dodge', 0.7);
@@ -398,8 +543,10 @@ export class Game {
       const previous = this.enemyPreviousPositions.get(enemy) ?? enemy.group.position.clone();
       previous.copy(enemy.group.position);
       const spawnId = this.enemySpawnIds.get(enemy);
-      const enabled = spawnId ? this.encounterDirector.isEnemyEnabled(spawnId) : false;
-      const leashRegions = this.enemyLeashRegions.get(enemy) ?? FIRMAMENT_ROUTE_WALKABLE;
+      const enabled = spawnId
+        ? this.encounterDirector.isEnemyEnabled(spawnId) || this.branchDirector.isEnemyEnabled(spawnId)
+        : false;
+      const leashRegions = this.enemyLeashRegions.get(enemy) ?? FIRMAMENT_ROUTE_ALL_WALKABLE;
       const playerInLeash = this.collision.containsInWalkableUnion(
         this.player.group.position,
         this.player.radius * 0.2,
@@ -419,6 +566,8 @@ export class Game {
       );
       if (enemy.active && !enemy.dormant) {
         this.collision.resolveRouteMovement(previous, enemy.group.position, enemy.velocity, enemy.radius, leashRegions);
+        const surface = routeElevationAt(FIRMAMENT_ROUTE, [enemy.group.position.x, enemy.group.position.z]);
+        enemy.group.position.y = surface + (enemy.kind === 'wisp' ? 0.55 + Math.sin(this.elapsed * 3.1 + enemy.id) * 0.18 : 0);
       }
     }
     this.separateEnemies();
@@ -430,7 +579,7 @@ export class Game {
         enemy.group.position,
         enemy.velocity,
         enemy.radius,
-        this.enemyLeashRegions.get(enemy) ?? FIRMAMENT_ROUTE_WALKABLE,
+        this.enemyLeashRegions.get(enemy) ?? FIRMAMENT_ROUTE_ALL_WALKABLE,
       );
     }
     for (const attack of this.enemyAttacks) this.resolveEnemyAttack(attack);
@@ -449,7 +598,13 @@ export class Game {
 
   private updatePresentation(delta: number): void {
     const restoration = (this.restoredCount + (this.phase === 'victory' ? 1 : 0)) / PROGRESSION_TARGET;
+    this.world.setFocusPosition(this.player.group.position);
     this.world.update(delta, this.elapsed, restoration);
+    for (const relic of this.relics) {
+      const dx = relic.position.x - this.player.group.position.x;
+      const dz = relic.position.z - this.player.group.position.z;
+      relic.group.visible = dx * dx + dz * dz <= 34 * 34;
+    }
     this.vfx.update(delta, this.elapsed);
     const activeBoss = this.getActiveBoss();
     const cameraTarget = this.lockedTarget?.active
@@ -481,7 +636,7 @@ export class Game {
       for (const enemy of this.enemies) {
         if (!enemy.active || enemy.dormant) continue;
         if (!this.collision.isInCone(this.player.group.position, this.player.facing, 2.35, 0.78, enemy.group.position, enemy.radius)) continue;
-        this.damageEnemy(enemy, 27 * (1 + this.affinity.wrathful * 0.22), 'melee');
+        this.damageEnemy(enemy, 27 * this.player.meleeMultiplier * (1 + this.affinity.wrathful * 0.22), 'melee');
         hitCount += 1;
       }
       this.vfx.emitCast(this.player.group.position, this.player.facing, 0.65);
@@ -489,40 +644,78 @@ export class Game {
       this.emitAudio('melee', hitCount > 0 ? 0.9 : 0.45);
     }
 
-    if (this.input.consume('lunar') && this.player.tryCastLunar()) {
-      this.player.setFacing(this.aimDirection);
-      const track = this.recordSpellUse('lunar');
-      const damage = 18 * this.magicMultiplier('lunar') * this.tierMultiplier(track.tier);
+    if (this.input.consume('lunar')) this.castEquippedAbility(0);
+    if (this.input.consume('aurora')) this.castEquippedAbility(1);
+    if (this.input.consume('ability3')) this.castEquippedAbility(2);
+  }
+
+  private castEquippedAbility(slot: number): void {
+    const ability = this.progression.equippedAbilities[slot];
+    if (!ability || !this.player.tryUseAbility(slot, ability.focusCost, ability.cooldownSeconds)) return;
+    this.player.setFacing(this.aimDirection);
+    const trackSchool: 'lunar' | 'aurora' = ability.school === 'aurora' ? 'aurora' : 'lunar';
+    const track = this.recordSpellUse(trackSchool);
+    const source: DamageSource = trackSchool;
+    const damage = ability.power * this.player.spellMultiplier * this.magicMultiplier(trackSchool) * this.tierMultiplier(track.tier);
+    const surface = routeElevationAt(FIRMAMENT_ROUTE, [this.player.group.position.x, this.player.group.position.z]);
+
+    if (ability.form === 'bolt') {
       const origin = this.player.group.position.clone().addScaledVector(this.player.facing, 0.85);
-      origin.y = 0.82;
-      const projectile = new CombatProjectile('player', 'lunar', origin, this.player.facing, 13.5, damage, 0.23, 3.1);
+      origin.y = surface + 0.78;
+      const kind = ability.school === 'lunar'
+        ? 'lunar'
+        : ability.school === 'aurora'
+          ? 'aurora'
+          : ability.school === 'eclipse'
+            ? 'eclipse'
+            : 'star';
+      const projectile = new CombatProjectile('player', kind, origin, this.player.facing, ability.school === 'comet' ? 16 : 13.5, damage, 0.23, 3.1);
+      projectile.setSurfaceHeight(surface);
       this.projectiles.push(projectile);
       this.scene.add(projectile.group);
       this.vfx.emitCast(origin, this.player.facing, 0.9 + this.tierRank(track.tier) * 0.08);
-      this.emitAudio('lunar-cast', 0.78);
-    }
-
-    if (this.input.consume('aurora') && this.player.tryCastAurora()) {
-      this.player.setFacing(this.aimDirection);
-      const track = this.recordSpellUse('aurora');
-      const damage = 31 * this.magicMultiplier('aurora') * this.tierMultiplier(track.tier);
+    } else if (ability.form === 'wave') {
       let hitCount = 0;
       for (const enemy of this.enemies) {
         if (!enemy.active || enemy.dormant) continue;
         if (!this.collision.isInCone(this.player.group.position, this.player.facing, 7.6, 0.5, enemy.group.position, enemy.radius)) continue;
-        this.damageEnemy(enemy, damage * Math.max(0.72, 1 - hitCount * 0.12), 'aurora');
+        this.damageEnemy(enemy, damage * Math.max(0.7, 1 - hitCount * 0.1), source);
         this.vfx.emitHit(enemy.group.position, this.player.facing, 1.1);
         hitCount += 1;
-        if (hitCount >= 4) break;
+        if (hitCount >= (ability.effect === 'chain' ? 6 : 4)) break;
       }
-      if (hitCount > 0) {
+      if (hitCount > 0 && (ability.effect === 'leech' || ability.school === 'aurora')) {
         this.player.heal((5 + this.affinity.mercy * 8) * Math.min(2, hitCount));
         this.affinity.mercy = Math.min(1, this.affinity.mercy + 0.006 * hitCount);
-        this.cameraRig.kick(0.15, 0.2);
       }
       this.vfx.emitCast(this.player.group.position, this.player.facing, 1.45);
-      this.emitAudio('aurora-cast', 0.9);
+    } else if (ability.form === 'nova') {
+      let hitCount = 0;
+      for (const enemy of this.enemies) {
+        if (!enemy.active || enemy.dormant) continue;
+        if (!this.collision.circlesOverlap(this.player.group.position, 4.6, enemy.group.position, enemy.radius)) continue;
+        this.damageEnemy(enemy, damage, source);
+        this.vfx.emitHit(enemy.group.position, this.tempDirection.set(0, 1, 0), 1.2);
+        hitCount += 1;
+      }
+      if (ability.effect === 'ward') this.player.heal(8 + hitCount * 2);
+      this.vfx.emitCelestialRestoration(this.player.group.position, 1.2);
+    } else {
+      const origin = this.player.group.position.clone();
+      const destination = origin.clone().addScaledVector(this.player.facing, 4.2);
+      const velocity = this.player.facing.clone();
+      this.collision.resolveRouteMovement(origin, destination, velocity, this.player.radius);
+      this.player.group.position.copy(destination);
+      this.player.setGroundHeight(routeElevationAt(FIRMAMENT_ROUTE, [destination.x, destination.z]));
+      for (const enemy of this.enemies) {
+        if (!enemy.active || enemy.dormant) continue;
+        if (enemy.group.position.distanceToSquared(origin) <= (3.2 + enemy.radius) ** 2) this.damageEnemy(enemy, damage * 0.8, source);
+      }
+      this.vfx.emitDodge(origin, this.player.facing, 1.4);
+      this.vfx.emitCelestialRestoration(this.player.group.position, 0.9);
     }
+    this.cameraRig.kick(0.11, 0.18);
+    this.emitAudio(ability.school === 'aurora' ? 'aurora-cast' : 'lunar-cast', 0.82);
   }
 
   private updateTargeting(): void {
@@ -586,7 +779,7 @@ export class Game {
         ? new THREE.Vector3(Math.sin(angle), 0, Math.cos(angle))
         : attack.direction.clone().applyAxisAngle(THREE.Object3D.DEFAULT_UP, angle);
       const origin = attack.source.group.position.clone().addScaledVector(direction, attack.source.radius + 0.28);
-       origin.y = attack.source.isBoss ? 1.25 : 0.78;
+       origin.y = attack.source.group.position.y + (attack.source.isBoss ? 1.25 : 0.78);
       const projectile = new CombatProjectile(
         'enemy',
          attack.source.isBoss ? 'eclipse' : 'star',
@@ -597,6 +790,7 @@ export class Game {
         attack.radius,
         4.2,
       );
+      projectile.setSurfaceHeight(routeElevationAt(FIRMAMENT_ROUTE, [origin.x, origin.z]));
       this.projectiles.push(projectile);
       this.scene.add(projectile.group);
     }
@@ -606,7 +800,9 @@ export class Game {
   private updateProjectiles(delta: number): void {
     for (let index = this.projectiles.length - 1; index >= 0; index -= 1) {
       const projectile = this.projectiles[index];
+      projectile.setSurfaceHeight(routeElevationAt(FIRMAMENT_ROUTE, [projectile.group.position.x, projectile.group.position.z]));
       projectile.update(delta, this.elapsed);
+      projectile.setSurfaceHeight(routeElevationAt(FIRMAMENT_ROUTE, [projectile.group.position.x, projectile.group.position.z]));
       if (
         projectile.active &&
         (this.collision.sweepClosedGates(projectile.previousPosition, projectile.group.position, projectile.radius) ||
@@ -661,7 +857,43 @@ export class Game {
     }
     const spawnId = this.enemySpawnIds.get(enemy);
     const defeat = spawnId ? this.encounterDirector.markEnemyDefeated(spawnId) : null;
+    const branchDefeat = spawnId && !defeat?.accepted ? this.branchDirector.markEnemyDefeated(spawnId) : null;
+    if (branchDefeat?.encounterCompleted && branchDefeat.encounterId) {
+      const encounter = (FIRMAMENT_ROUTE.branchEncounters ?? []).find((candidate) => candidate.id === branchDefeat.encounterId);
+      const section = encounter
+        ? FIRMAMENT_ROUTE_ALL_SECTIONS.find((candidate) => candidate.id === encounter.sectionIds[0])
+        : null;
+      this.progression.recordEncounterVictory(2 + (FIRMAMENT_ROUTE.branchEncounters ?? []).findIndex((candidate) => candidate.id === branchDefeat.encounterId));
+      this.progression.createRewardOffer(
+        `branch:${branchDefeat.encounterId}`,
+        encounter?.name ?? 'Memory of the chosen path',
+        section && 'biome' in section ? section.biome ?? 'moonless-tundra' : 'moonless-tundra',
+      );
+      this.applyProgressionBuild();
+      this.phase = 'exploration';
+      this.syncRouteState();
+      this.hud.showDiscovery({
+        id: `branch-cleared-${branchDefeat.encounterId}`,
+        visible: true,
+        kicker: 'Path consequence sealed',
+        title: encounter?.name ?? 'The detour is complete',
+        detail: 'A procedural memory has formed. Choose it in the Star Atlas.',
+        duration: 2200,
+      });
+      this.emitAudio('checkpoint', 0.82);
+    }
     if (defeat?.encounterCompleted) {
+      const completedEncounter = FIRMAMENT_ROUTE.encounters.find((candidate) => candidate.spawns.some((spawn) => spawn.id === spawnId));
+      if (completedEncounter) {
+        this.progression.recordEncounterVictory(completedEncounter.order);
+        const section = FIRMAMENT_ROUTE_ALL_SECTIONS.find((candidate) => candidate.id === completedEncounter.sectionIds[0]);
+        this.progression.createRewardOffer(
+          `encounter:${completedEncounter.id}`,
+          completedEncounter.name,
+          section && 'biome' in section ? section.biome ?? 'moonless-tundra' : 'moonless-tundra',
+        );
+        this.applyProgressionBuild();
+      }
       if (enemy === this.midpointBoss) this.encounterDirector.commitProgressBoundary();
       this.syncRouteState();
       if (enemy === this.boss) {
@@ -688,12 +920,13 @@ export class Game {
   }
 
   private damagePlayer(amount: number, force = false): boolean {
-    const applied = this.player.takeDamage(amount, force);
+    const scaledAmount = force ? amount : amount * this.progression.enemyPowerMultiplier;
+    const applied = this.player.takeDamage(scaledAmount, force);
     if (!applied) return false;
-    this.damageTaken += amount;
+    this.damageTaken += scaledAmount;
     this.cameraRig.kick(0.25, 0.28);
     this.vfx.emitHit(this.player.group.position, this.tempDirection.set(0, 1, 0), 1.25);
-    this.emitAudio('player-hit', Math.min(1, amount / 24));
+    this.emitAudio('player-hit', Math.min(1, scaledAmount / 24));
     return true;
   }
 
@@ -716,6 +949,7 @@ export class Game {
     if (!relic.restore()) return;
     const checkpointId = this.relicCheckpointIds.get(relic);
     if (checkpointId) this.encounterDirector.activateCheckpoint(checkpointId);
+    this.progression.commitCheckpoint();
     this.restoredCount += 1;
     this.checkpoint.copy(relic.position).add(new THREE.Vector3(0, 0.02, 2.6));
     this.player.heal(this.player.maxHealth);
@@ -805,6 +1039,7 @@ export class Game {
   private restartFromCheckpoint(): void {
     this.clearProjectiles();
     this.encounterDirector.restoreLastCheckpoint();
+    this.branchDirector.restoreAfterDeath();
     this.syncRouteState();
     this.resetEnemiesForRouteState();
     const routeCheckpoint = this.encounterDirector.currentCheckpoint;
@@ -826,6 +1061,8 @@ export class Game {
   private restartFullRun(): void {
     this.clearProjectiles();
     this.encounterDirector.reset();
+    this.branchDirector.reset();
+    this.progression.reset(this.characterProfile);
     this.syncRouteState();
     for (const relic of this.relics) relic.reset();
     this.resetEnemiesForRouteState();
@@ -848,6 +1085,7 @@ export class Game {
     this.player.charms.clear();
     this.player.addCharm('Initiate\'s lunar medallion');
     this.player.setFocusRegenMultiplier(1);
+    this.applyProgressionBuild(false);
     this.player.restoreAt(START_POSITION);
     this.phase = 'exploration';
     this.input.setEnabled(true);
@@ -862,7 +1100,10 @@ export class Game {
       enemy.reset();
       const encounterId = enemy.encounterId;
       if (!encounterId) continue;
-      const state = this.encounterDirector.getEncounterState(encounterId);
+      const isBranchEncounter = (FIRMAMENT_ROUTE.branchEncounters ?? []).some((encounter) => encounter.id === encounterId);
+      const state = isBranchEncounter
+        ? this.branchDirector.getEncounterState(encounterId)
+        : this.encounterDirector.getEncounterState(encounterId);
       if (state === 'cleared') {
         enemy.awaken();
         enemy.takeDamage(enemy.maxHealth + 1);
@@ -974,12 +1215,13 @@ export class Game {
     );
     let finalBoss: Enemy | null = null;
 
-    for (const encounter of FIRMAMENT_ROUTE.encounters) {
+    for (const encounter of FIRMAMENT_ROUTE_ALL_ENCOUNTERS) {
       for (const spawn of encounter.spawns) {
+        const elevation = routeElevationAt(FIRMAMENT_ROUTE, spawn.position);
         const enemy = new Enemy({
           id: id++,
           kind: spawn.kind,
-          position: new THREE.Vector3(spawn.position[0], 0, spawn.position[1]),
+          position: new THREE.Vector3(spawn.position[0], elevation, spawn.position[1]),
           guardRelic: guardedRelicByEncounter.get(encounter.id),
           encounterId: encounter.id,
           initiallyDormant: true,
@@ -1008,10 +1250,10 @@ export class Game {
         this.enemyPreviousPositions.set(enemy, enemy.group.position.clone());
         const leashRegions: RouteShape[] = [];
         for (const sectionId of spawn.leashSectionIds) {
-          const section = FIRMAMENT_ROUTE.sections.find((candidate) => candidate.id === sectionId);
+          const section = FIRMAMENT_ROUTE_ALL_SECTIONS.find((candidate) => candidate.id === sectionId);
           if (section) leashRegions.push(...(section.walkable as readonly RouteShape[]));
         }
-        this.enemyLeashRegions.set(enemy, leashRegions.length > 0 ? leashRegions : FIRMAMENT_ROUTE_WALKABLE);
+        this.enemyLeashRegions.set(enemy, leashRegions.length > 0 ? leashRegions : FIRMAMENT_ROUTE_ALL_WALKABLE);
         this.scene.add(enemy.group);
         if (spawn.kind === 'orreryCastellan') this.midpointBoss = enemy;
         if (spawn.kind === 'eclipseArchon') finalBoss = enemy;
@@ -1067,18 +1309,34 @@ export class Game {
     if (this.phase === 'victory') return 'The Eclipse Archon is defeated; the firmament remembers';
     const activeBoss = this.getActiveBoss();
     if (this.phase === 'boss' && activeBoss) return `Defeat ${activeBoss.displayName} — phase ${activeBoss.phase}`;
+    const activeBranch = this.branchDirector.activeEncounter;
+    if (activeBranch) return activeBranch.objective;
+    const choice = this.nearbyChoiceId
+      ? (FIRMAMENT_ROUTE.choices ?? []).find((candidate) => candidate.id === this.nearbyChoiceId)
+      : null;
+    if (choice) return choice.prompt;
+    if (this.progression.currentOffer) return 'Choose a newly formed memory in the Star Atlas';
     const readyRelic = this.relics.find((candidate) => candidate.state === 'ready');
     if (readyRelic) return `Claim the restored ${readyRelic.kind} body`;
     return this.encounterDirector.objective;
   }
 
-  private findCurrentSection(): RouteSectionDefinition | null {
+  private findCurrentSection(): AnyRouteSection | null {
     const position = this.player.group.position;
-    return (
-      FIRMAMENT_ROUTE.sections.find((section) =>
-        this.collision.containsInWalkableUnion(position, this.player.radius * 0.25, section.walkable),
-      ) ?? null
-    );
+    let best: AnyRouteSection | null = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (const section of FIRMAMENT_ROUTE_ALL_SECTIONS) {
+      if (!this.collision.containsInWalkableUnion(position, this.player.radius * 0.25, section.walkable)) continue;
+      const score = Math.min(...section.walkable.map((shape) => {
+        const distance = Math.hypot(position.x - shape.center[0], position.z - shape.center[1]);
+        const scale = shape.kind === 'circle' ? shape.radius : Math.hypot(shape.halfExtents[0], shape.halfExtents[1]);
+        return distance / Math.max(0.001, scale) + (shape.kind === 'circle' ? -0.08 : 0);
+      }));
+      if (score >= bestScore) continue;
+      bestScore = score;
+      best = section;
+    }
+    return best;
   }
 
   private publishDiagnostics(forceEvent = false): void {
@@ -1087,6 +1345,12 @@ export class Game {
       this.enemies.filter((enemy) => enemy.kind === kind && enemy.active && !enemy.dormant).length;
     const activeBoss = this.getActiveBoss();
     const routeSnapshot = this.encounterDirector.getSnapshot();
+    const branchSnapshot = this.branchDirector.getSnapshot();
+    const progressionSnapshot = this.progression.getSnapshot();
+    const combinedGates = this.combinedGateStates();
+    const availableChoice = this.nearbyChoiceId
+      ? (FIRMAMENT_ROUTE.choices ?? []).find((choice) => choice.id === this.nearbyChoiceId) ?? null
+      : null;
     const info = this.renderer.info;
     const snapshot = {
       frame: this.frame,
@@ -1132,6 +1396,10 @@ export class Game {
           ashenInitiate: activeByKind('ashenInitiate'),
           astralLancer: activeByKind('astralLancer'),
           eclipseChorister: activeByKind('eclipseChorister'),
+          emberPenitent: activeByKind('emberPenitent'),
+          drownedCantor: activeByKind('drownedCantor'),
+          prismScribe: activeByKind('prismScribe'),
+          thornReliquary: activeByKind('thornReliquary'),
           orreryCastellan: activeByKind('orreryCastellan'),
           eclipseArchon: activeByKind('eclipseArchon'),
         },
@@ -1150,6 +1418,7 @@ export class Game {
         target: this.relics.length,
         charms: [...this.player.charms],
         equipment: { ...this.player.equipment },
+        ...progressionSnapshot,
       },
       affinity: { ...this.affinity },
       comprehension: {
@@ -1168,9 +1437,11 @@ export class Game {
         nextEncounterId: routeSnapshot.nextEncounterId,
         currentCheckpointId: routeSnapshot.currentCheckpointId,
         completedEncounterIds: [...routeSnapshot.completedEncounterIds],
-        gateStates: Object.fromEntries(routeSnapshot.gates.map((gate) => [gate.id, gate.state])),
+        gateStates: Object.fromEntries(combinedGates.map((gate) => [gate.id, gate.state])),
         campaignComplete: routeSnapshot.campaignComplete,
         currentSectionId: this.findCurrentSection()?.id ?? FIRMAMENT_ROUTE.start.sectionId,
+        availableChoice,
+        branch: branchSnapshot,
       },
       simulation: {
         engine: 'deterministic-custom-circles',
@@ -1286,13 +1557,67 @@ export class Game {
         this.publishDiagnostics(true);
       },
       showSection: (sectionId) => {
-        const section = FIRMAMENT_ROUTE.sections.find((candidate) => candidate.id === sectionId);
+        const section = FIRMAMENT_ROUTE_ALL_SECTIONS.find((candidate) => candidate.id === sectionId);
         const shape = section?.walkable[0];
         if (!section || !shape) return;
-        const position = new THREE.Vector3(shape.center[0], 0.02, shape.center[1]);
+        const position = new THREE.Vector3(
+          shape.center[0],
+          routeElevationAt(FIRMAMENT_ROUTE, shape.center) + 0.02,
+          shape.center[1],
+        );
         this.player.restoreAt(position);
         this.player.setFacing(new THREE.Vector3(section.cameraForward[0], 0, section.cameraForward[1]));
         this.cameraRig.snapTo(position);
+        this.publishDiagnostics(true);
+      },
+      chooseBranch: (choiceId, optionId) => {
+        this.nearbyChoiceId = choiceId;
+        this.onRouteChoiceIntent(new CustomEvent<RouteChoiceIntentDetail>('test-route-choice', { detail: { choiceId, optionId } }));
+      },
+      activateBranchEncounter: (encounterId) => {
+        const encounter = (FIRMAMENT_ROUTE.branchEncounters ?? []).find((candidate) => candidate.id === encounterId);
+        if (!encounter) return;
+        const option = (FIRMAMENT_ROUTE.choices ?? [])
+          .flatMap((choice) => choice.options.map((candidate) => ({ choice, option: candidate })))
+          .find((candidate) => candidate.option.encounterId === encounterId);
+        if (!option) return;
+        if (!this.branchDirector.getSelectedOption(option.choice.id)) {
+          this.nearbyChoiceId = option.choice.id;
+          this.onRouteChoiceIntent(new CustomEvent<RouteChoiceIntentDetail>('test-route-choice', {
+            detail: { choiceId: option.choice.id, optionId: option.option.id },
+          }));
+        }
+        const surface = routeElevationAt(FIRMAMENT_ROUTE, encounter.activation.center);
+        const position = new THREE.Vector3(encounter.activation.center[0], surface + 0.02, encounter.activation.center[1]);
+        this.player.restoreAt(position);
+        const activated = this.branchDirector.activateSelectedEncounterAt(encounter.activation.center, this.player.radius);
+        if (activated) this.onBranchEncounterActivated(activated);
+        this.cameraRig.snapTo(position);
+        this.publishDiagnostics(true);
+      },
+      defeatActiveBranchEncounter: () => {
+        const encounter = this.branchDirector.activeEncounter;
+        if (!encounter) return;
+        for (const spawn of encounter.spawns) {
+          const enemy = this.enemyBySpawnId.get(spawn.id);
+          if (!enemy?.active) continue;
+          this.enemyWakeAt.delete(enemy);
+          if (enemy.dormant) enemy.awaken();
+          this.damageEnemy(enemy, enemy.health + 1, 'lunar');
+        }
+        this.publishDiagnostics(true);
+      },
+      claimReward: (choiceIndex = 0) => {
+        const offer = this.progression.currentOffer;
+        const choice = offer?.choices[choiceIndex];
+        if (!offer || !choice) return;
+        this.progression.claimReward(offer.id, choice.id);
+        this.applyProgressionBuild();
+        this.publishDiagnostics(true);
+      },
+      allocateSpec: (branch) => {
+        this.progression.allocateSpec(branch);
+        this.applyProgressionBuild();
         this.publishDiagnostics(true);
       },
       victoryTrade: () => {

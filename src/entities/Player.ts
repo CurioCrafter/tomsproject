@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { AuthoredModel } from '../assets/GameModels';
 import type { InputController } from '../core/InputController';
+import type { BuildModifiers } from '../game/progression/ProgressionTypes';
 
 export type PlayerTuning = {
   speed: number;
@@ -26,9 +27,6 @@ export class Player {
   readonly velocity = new THREE.Vector3();
   readonly facing = new THREE.Vector3(0, 0, -1);
   readonly radius = 0.52;
-  readonly maxHealth = 120;
-  readonly maxStamina = 100;
-  readonly maxFocus = 100;
   readonly equipment: PlayerEquipment = {
     catalyst: 'Moon-etched ash staff',
     melee: 'Meteor-iron arming sword',
@@ -36,9 +34,9 @@ export class Player {
   };
   readonly charms = new Set<string>(['Initiate\'s lunar medallion']);
 
-  health = this.maxHealth;
-  stamina = this.maxStamina;
-  focus = this.maxFocus;
+  health = 120;
+  stamina = 100;
+  focus = 100;
   dead = false;
 
   private readonly move = new THREE.Vector2();
@@ -68,8 +66,7 @@ export class Player {
   private readonly lockRing: THREE.Mesh;
   private readonly ownedGeometries: THREE.BufferGeometry[] = [];
   private meleeCooldown = 0;
-  private lunarCooldown = 0;
-  private auroraCooldown = 0;
+  private readonly abilityCooldowns: [number, number, number] = [0, 0, 0];
   private attackAnimation = 0;
   private castAnimation = 0;
   private dodgeTimer = 0;
@@ -77,6 +74,16 @@ export class Player {
   private staminaDelay = 0;
   private damageFlash = 0;
   private focusRegenMultiplier = 1;
+  private maximumHealth = 120;
+  private maximumStamina = 100;
+  private maximumFocus = 100;
+  private moveSpeedMultiplier = 1;
+  private meleePowerMultiplier = 1;
+  private spellPowerMultiplier = 1;
+  private cooldownRate = 0;
+  private damageReduction = 0;
+  private healingMultiplier = 1;
+  private groundHeight = 0;
   private authoredModel: AuthoredModel | null = null;
 
   constructor() {
@@ -138,6 +145,26 @@ export class Player {
     return this.dodgeTimer > 0;
   }
 
+  get maxHealth(): number {
+    return this.maximumHealth;
+  }
+
+  get maxStamina(): number {
+    return this.maximumStamina;
+  }
+
+  get maxFocus(): number {
+    return this.maximumFocus;
+  }
+
+  get meleeMultiplier(): number {
+    return this.meleePowerMultiplier;
+  }
+
+  get spellMultiplier(): number {
+    return this.spellPowerMultiplier;
+  }
+
   useAuthoredModel(model: AuthoredModel): void {
     if (this.authoredModel) {
       this.swordPivot.removeFromParent();
@@ -176,9 +203,9 @@ export class Player {
     }
 
     if (this.dodgeTimer > 0) {
-      this.velocity.copy(this.dodgeDirection).multiplyScalar(tuning.speed * tuning.dashMultiplier * 1.28);
+      this.velocity.copy(this.dodgeDirection).multiplyScalar(tuning.speed * this.moveSpeedMultiplier * tuning.dashMultiplier * 1.28);
     } else {
-      this.targetVelocity.set(this.move.x, 0, this.move.y).multiplyScalar(tuning.speed);
+      this.targetVelocity.set(this.move.x, 0, this.move.y).multiplyScalar(tuning.speed * this.moveSpeedMultiplier);
       const smoothing = 1 - Math.exp(-tuning.acceleration * delta);
       this.velocity.lerp(this.targetVelocity, smoothing);
     }
@@ -191,7 +218,7 @@ export class Player {
       this.facing.set(this.velocity.x, 0, this.velocity.z).normalize();
     }
     this.group.rotation.y = THREE.MathUtils.damp(this.group.rotation.y, Math.atan2(-this.facing.x, -this.facing.z), 15, delta);
-    this.group.position.y = 0.02 + Math.sin(elapsed * 8.5) * Math.min(this.velocity.length() / 80, 0.045);
+    this.group.position.y = this.groundHeight + 0.02 + Math.sin(elapsed * 8.5) * Math.min(this.velocity.length() / 80, 0.045);
     this.group.rotation.z = THREE.MathUtils.damp(this.group.rotation.z, 0, 10, delta);
 
     if (this.staminaDelay <= 0) this.stamina = Math.min(this.maxStamina, this.stamina + 28 * delta);
@@ -203,30 +230,32 @@ export class Player {
     if (this.dead || this.meleeCooldown > 0 || this.stamina < 14 || this.isDodging) return false;
     this.stamina -= 14;
     this.staminaDelay = 0.44;
-    this.meleeCooldown = 0.46;
+    this.meleeCooldown = 0.46 / (1 + this.cooldownRate);
     this.attackAnimation = 0.34;
     return true;
   }
 
   tryCastLunar(): boolean {
-    if (this.dead || this.lunarCooldown > 0 || this.focus < 15 || this.isDodging) return false;
-    this.focus -= 15;
-    this.lunarCooldown = 0.38;
-    this.castAnimation = 0.28;
-    return true;
+    return this.tryUseAbility(0, 15, 0.38);
   }
 
   tryCastAurora(): boolean {
-    if (this.dead || this.auroraCooldown > 0 || this.focus < 28 || this.isDodging) return false;
-    this.focus -= 28;
-    this.auroraCooldown = 1.08;
-    this.castAnimation = 0.58;
+    return this.tryUseAbility(1, 28, 1.08);
+  }
+
+  tryUseAbility(slot: number, focusCost: number, cooldownSeconds: number): boolean {
+    if (!Number.isInteger(slot) || slot < 0 || slot >= this.abilityCooldowns.length) return false;
+    if (this.dead || this.abilityCooldowns[slot] > 0 || this.focus < focusCost || this.isDodging) return false;
+    this.focus -= Math.max(0, focusCost);
+    this.abilityCooldowns[slot] = Math.max(0.08, cooldownSeconds) / (1 + this.cooldownRate);
+    this.castAnimation = cooldownSeconds >= 0.8 ? 0.58 : 0.32;
     return true;
   }
 
   takeDamage(amount: number, ignoreInvulnerability = false): boolean {
     if (this.dead || (this.isInvulnerable && !ignoreInvulnerability)) return false;
-    this.health = Math.max(0, this.health - Math.max(0, amount));
+    const appliedAmount = Math.max(0, amount) * (ignoreInvulnerability ? 1 : 1 - this.damageReduction);
+    this.health = Math.max(0, this.health - appliedAmount);
     this.invulnerabilityTimer = 0.48;
     this.damageFlash = 0.2;
     if (this.health <= 0) {
@@ -237,7 +266,7 @@ export class Player {
   }
 
   heal(amount: number): void {
-    this.health = Math.min(this.maxHealth, this.health + Math.max(0, amount));
+    this.health = Math.min(this.maxHealth, this.health + Math.max(0, amount) * this.healingMultiplier);
   }
 
   setFacing(direction: THREE.Vector3): void {
@@ -261,9 +290,40 @@ export class Player {
     Object.assign(this.equipment, equipment);
   }
 
+  setGroundHeight(height: number): void {
+    if (!Number.isFinite(height)) return;
+    this.groundHeight = height;
+    this.group.position.y = height + 0.02;
+  }
+
+  applyBuild(modifiers: BuildModifiers, preserveResourceRatios = true): void {
+    const healthRatio = this.maximumHealth > 0 ? this.health / this.maximumHealth : 1;
+    const staminaRatio = this.maximumStamina > 0 ? this.stamina / this.maximumStamina : 1;
+    const focusRatio = this.maximumFocus > 0 ? this.focus / this.maximumFocus : 1;
+    this.maximumHealth = Math.max(50, 120 + modifiers.maxHealth);
+    this.maximumStamina = Math.max(45, 100 + modifiers.maxStamina);
+    this.maximumFocus = Math.max(35, 100 + modifiers.maxFocus);
+    this.moveSpeedMultiplier = THREE.MathUtils.clamp(1 + modifiers.moveSpeed, 0.72, 1.55);
+    this.meleePowerMultiplier = Math.max(0.35, 1 + modifiers.meleePower);
+    this.spellPowerMultiplier = Math.max(0.35, 1 + modifiers.spellPower);
+    this.cooldownRate = THREE.MathUtils.clamp(modifiers.cooldownRate, -0.35, 1.25);
+    this.damageReduction = THREE.MathUtils.clamp(modifiers.damageReduction, 0, 0.65);
+    this.healingMultiplier = Math.max(0.25, 1 + modifiers.healingPower);
+    if (preserveResourceRatios) {
+      this.health = THREE.MathUtils.clamp(healthRatio * this.maximumHealth, 0, this.maximumHealth);
+      this.stamina = THREE.MathUtils.clamp(staminaRatio * this.maximumStamina, 0, this.maximumStamina);
+      this.focus = THREE.MathUtils.clamp(focusRatio * this.maximumFocus, 0, this.maximumFocus);
+    } else {
+      this.health = this.maximumHealth;
+      this.stamina = this.maximumStamina;
+      this.focus = this.maximumFocus;
+    }
+  }
+
   restoreAt(position: THREE.Vector3): void {
     this.group.position.copy(position);
-    this.group.position.y = 0.02;
+    this.groundHeight = Math.max(-12, Math.min(12, position.y - 0.02));
+    this.group.position.y = this.groundHeight + 0.02;
     this.group.rotation.z = 0;
     this.velocity.set(0, 0, 0);
     this.health = this.maxHealth;
@@ -273,8 +333,7 @@ export class Player {
     this.dodgeTimer = 0;
     this.invulnerabilityTimer = 1.2;
     this.meleeCooldown = 0;
-    this.lunarCooldown = 0;
-    this.auroraCooldown = 0;
+    this.abilityCooldowns.fill(0);
   }
 
   dispose(): void {
@@ -297,8 +356,9 @@ export class Player {
 
   private tickTimers(delta: number): void {
     this.meleeCooldown = Math.max(0, this.meleeCooldown - delta);
-    this.lunarCooldown = Math.max(0, this.lunarCooldown - delta);
-    this.auroraCooldown = Math.max(0, this.auroraCooldown - delta);
+    for (let index = 0; index < this.abilityCooldowns.length; index += 1) {
+      this.abilityCooldowns[index] = Math.max(0, this.abilityCooldowns[index] - delta);
+    }
     this.attackAnimation = Math.max(0, this.attackAnimation - delta);
     this.castAnimation = Math.max(0, this.castAnimation - delta);
     this.dodgeTimer = Math.max(0, this.dodgeTimer - delta);

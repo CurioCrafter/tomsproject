@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { MaterialLibrary } from '../assets/MaterialLibrary';
-import { FIRMAMENT_ROUTE } from '../game/content/FirmamentRoute';
-import type { GateStateSnapshot, RouteSectionDefinition, RouteShape } from '../game/content/RouteTypes';
+import { FIRMAMENT_ROUTE, FIRMAMENT_ROUTE_ALL_SECTIONS } from '../game/content/FirmamentRoute';
+import { routeElevationAt, routeSectionElevationAt, type AnyRouteSection } from '../game/content/RouteGeometry';
+import type { GateStateSnapshot, RouteBiomeId, RouteShape } from '../game/content/RouteTypes';
 
 export type CelestialWorldOptions = {
   arenaHalfWidth?: number;
@@ -19,6 +20,12 @@ type SkyUniforms = {
   restoration: { value: number };
   time: { value: number };
 };
+
+type DistanceCullable = Readonly<{
+  object: THREE.Object3D;
+  center: THREE.Vector3;
+  maxDistance: number;
+}>;
 
 export class CelestialWorld {
   readonly root = new THREE.Group();
@@ -41,6 +48,9 @@ export class CelestialWorld {
   private readonly observatoryMechanism = new THREE.Group();
   private readonly floatingMonoliths: THREE.Object3D[] = [];
   private readonly gateVisuals = new Map<string, THREE.Group>();
+  private readonly biomeAccentMaterials = new Map<RouteBiomeId, THREE.MeshStandardMaterial>();
+  private readonly distanceCullables: DistanceCullable[] = [];
+  private readonly focusPosition = new THREE.Vector3();
   private readonly beaconLight = new THREE.PointLight('#7debd8', 0, 12, 2);
   private restoration = 0;
   private disposed = false;
@@ -178,6 +188,12 @@ export class CelestialWorld {
     this.observatoryMechanism.rotation.z = Math.sin(elapsed * 0.17) * 0.045;
     this.beaconLight.intensity = this.restoration * 9;
 
+    for (const entry of this.distanceCullables) {
+      const dx = entry.center.x - this.focusPosition.x;
+      const dz = entry.center.z - this.focusPosition.z;
+      entry.object.visible = dx * dx + dz * dz <= entry.maxDistance * entry.maxDistance;
+    }
+
     this.floatingMonoliths.forEach((monolith, index) => {
       const phase = elapsed * (0.22 + index * 0.018) + index * 1.7;
       monolith.position.y = monolith.userData.baseY + Math.sin(phase) * (0.08 + this.restoration * 0.16);
@@ -203,6 +219,10 @@ export class CelestialWorld {
     }
   }
 
+  setFocusPosition(position: THREE.Vector3): void {
+    this.focusPosition.copy(position);
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -215,6 +235,10 @@ export class CelestialWorld {
   private track<T extends THREE.BufferGeometry>(geometry: T): T {
     this.geometries.add(geometry);
     return geometry;
+  }
+
+  private registerCullable(object: THREE.Object3D, x: number, y: number, z: number, maxDistance = 34): void {
+    this.distanceCullables.push({ object, center: new THREE.Vector3(x, y, z), maxDistance });
   }
 
   private mesh(
@@ -286,9 +310,11 @@ export class CelestialWorld {
     this.ownedMaterials.add(chasmMaterial);
     const chasm = this.mesh('lightlessChasm', new THREE.PlaneGeometry(92, 142), chasmMaterial, this.playLayer, false);
     chasm.rotation.x = -Math.PI / 2;
-    chasm.position.set(0, -1.85, -10.5);
+    // Keep the void floor below the deepest authored crypt so descended paths
+    // remain visible rather than being occluded by the old flat backdrop.
+    chasm.position.set(0, -6.8, -10.5);
 
-    for (const section of FIRMAMENT_ROUTE.sections) {
+    for (const section of FIRMAMENT_ROUTE_ALL_SECTIONS) {
       section.walkable.forEach((shape, shapeIndex) => this.buildRouteSectionShape(section, shape, shapeIndex));
       if (section.kind === 'bridge' || section.kind === 'causeway' || section.kind === 'processional') {
         section.walkable.forEach((shape) => {
@@ -297,21 +323,25 @@ export class CelestialWorld {
       } else {
         this.buildCourtDetails(section);
       }
+      if ('biome' in section && section.biome) this.buildBiomeEnvironment(section);
     }
 
     for (const gate of FIRMAMENT_ROUTE.gates) this.buildRouteGate(gate.id, gate.collider.a, gate.collider.b, gate.initialState === 'open');
     this.buildSchoolSpire();
   }
 
-  private buildRouteSectionShape(section: RouteSectionDefinition, shape: RouteShape, shapeIndex: number): void {
+  private buildRouteSectionShape(section: AnyRouteSection, shape: RouteShape, shapeIndex: number): void {
+    const biome = 'biome' in section ? section.biome ?? 'moonless-tundra' : 'moonless-tundra';
+    const floorMaterial = this.materials.getBiomeFloor(biome);
+    const elevation = routeSectionElevationAt(section, shape.center);
     if (shape.kind === 'circle') {
       const foundation = this.mesh(
         `${section.id}.foundation.${shapeIndex}`,
         new THREE.CylinderGeometry(shape.radius, shape.radius + 0.48, 0.56, Math.max(18, Math.round(shape.radius * 4))),
-        this.materials.get('blackSlate'),
+        floorMaterial,
         this.playLayer,
       );
-      foundation.position.set(shape.center[0], -0.3, shape.center[1]);
+      foundation.position.set(shape.center[0], elevation - 0.3, shape.center[1]);
       const frostLip = this.mesh(
         `${section.id}.frostLip.${shapeIndex}`,
         new THREE.TorusGeometry(shape.radius * 0.94, 0.095, 6, 48),
@@ -319,20 +349,26 @@ export class CelestialWorld {
         this.playLayer,
         false,
       );
-      frostLip.position.set(shape.center[0], 0.015, shape.center[1]);
+      frostLip.position.set(shape.center[0], elevation + 0.015, shape.center[1]);
       frostLip.rotation.x = Math.PI / 2;
+      this.registerCullable(foundation, shape.center[0], elevation, shape.center[1]);
+      this.registerCullable(frostLip, shape.center[0], elevation, shape.center[1]);
       return;
     }
 
     const width = shape.halfExtents[0] * 2;
     const depth = shape.halfExtents[1] * 2;
+    if (section.kind === 'stair' && section.elevation && Math.abs(section.elevation.end - section.elevation.start) > 0.05) {
+      this.buildStairFlight(section, shape, floorMaterial, shapeIndex);
+      return;
+    }
     const foundation = this.mesh(
       `${section.id}.foundation.${shapeIndex}`,
       new THREE.BoxGeometry(width, 0.5, depth),
-      this.materials.get('blackSlate'),
+      floorMaterial,
       this.playLayer,
     );
-    foundation.position.set(shape.center[0], -0.27, shape.center[1]);
+    foundation.position.set(shape.center[0], elevation - 0.27, shape.center[1]);
     foundation.rotation.y = -shape.rotation;
     const inlay = this.mesh(
       `${section.id}.routeInlay.${shapeIndex}`,
@@ -341,16 +377,77 @@ export class CelestialWorld {
       this.playLayer,
       false,
     );
-    inlay.position.set(shape.center[0], 0.012, shape.center[1]);
+    inlay.position.set(shape.center[0], elevation + 0.012, shape.center[1]);
     inlay.rotation.y = -shape.rotation;
+    this.registerCullable(foundation, shape.center[0], elevation, shape.center[1]);
+    this.registerCullable(inlay, shape.center[0], elevation, shape.center[1]);
   }
 
-  private buildBridgeDetails(section: RouteSectionDefinition, shape: Extract<RouteShape, { kind: 'obb' }>): void {
+  private buildStairFlight(
+    section: AnyRouteSection,
+    shape: Extract<RouteShape, { kind: 'obb' }>,
+    material: THREE.Material,
+    shapeIndex: number,
+  ): void {
+    const profile = section.elevation ?? { start: 0, end: 0 };
+    const forwardLength = Math.hypot(section.cameraForward[0], section.cameraForward[1]) || 1;
+    const forwardX = section.cameraForward[0] / forwardLength;
+    const forwardZ = section.cameraForward[1] / forwardLength;
+    const depth = shape.halfExtents[1] * 2;
+    const count = THREE.MathUtils.clamp(Math.max(Math.ceil(depth / 0.55), Math.ceil(Math.abs(profile.end - profile.start) * 4)), 10, 30);
+    const stepDepth = depth / count;
+    const stepGeometry = this.track(new THREE.BoxGeometry(shape.halfExtents[0] * 2, 0.24, stepDepth + 0.08));
+    const steps = new THREE.InstancedMesh(stepGeometry, material, count);
+    steps.name = `${section.id}.stairFlight.${shapeIndex}`;
+    const matrix = new THREE.Matrix4();
+    const quaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, Math.atan2(forwardX, forwardZ), 0));
+    for (let index = 0; index < count; index += 1) {
+      const ratio = (index + 0.5) / count;
+      const distance = THREE.MathUtils.lerp(-depth * 0.5 + stepDepth * 0.5, depth * 0.5 - stepDepth * 0.5, ratio);
+      const top = THREE.MathUtils.lerp(profile.start, profile.end, (index + 1) / count);
+      matrix.compose(
+        new THREE.Vector3(shape.center[0] + forwardX * distance, top - 0.12, shape.center[1] + forwardZ * distance),
+        quaternion,
+        new THREE.Vector3(1, 1, 1),
+      );
+      steps.setMatrixAt(index, matrix);
+    }
+    steps.instanceMatrix.needsUpdate = true;
+    steps.castShadow = true;
+    steps.receiveShadow = true;
+    this.playLayer.add(steps);
+    this.registerCullable(steps, shape.center[0], (profile.start + profile.end) * 0.5, shape.center[1]);
+
+    const postIndices = Array.from({ length: Math.ceil(count / 3) + 1 }, (_, index) => Math.min(count - 1, index * 3));
+    const postGeometry = this.track(new THREE.CylinderGeometry(0.07, 0.1, 0.72, 6));
+    const posts = new THREE.InstancedMesh(postGeometry, this.biomeAccent(section), postIndices.length * 2);
+    posts.name = `${section.id}.stairLanternPosts`;
+    let instance = 0;
+    for (const stepIndex of postIndices) {
+      const ratio = (stepIndex + 0.5) / count;
+      const distance = THREE.MathUtils.lerp(-depth * 0.5, depth * 0.5, ratio);
+      const top = THREE.MathUtils.lerp(profile.start, profile.end, ratio);
+      for (const side of [-1, 1]) {
+        const sideX = forwardZ * side * (shape.halfExtents[0] - 0.15);
+        const sideZ = -forwardX * side * (shape.halfExtents[0] - 0.15);
+        matrix.makeTranslation(shape.center[0] + forwardX * distance + sideX, top + 0.34, shape.center[1] + forwardZ * distance + sideZ);
+        posts.setMatrixAt(instance, matrix);
+        instance += 1;
+      }
+    }
+    posts.instanceMatrix.needsUpdate = true;
+    posts.castShadow = true;
+    this.foregroundLayer.add(posts);
+    this.registerCullable(posts, shape.center[0], (profile.start + profile.end) * 0.5, shape.center[1]);
+  }
+
+  private buildBridgeDetails(section: AnyRouteSection, shape: Extract<RouteShape, { kind: 'obb' }>): void {
     const group = new THREE.Group();
     group.name = `${section.id}.bridgeKit`;
-    group.position.set(shape.center[0], 0, shape.center[1]);
+    group.position.set(shape.center[0], routeSectionElevationAt(section, shape.center), shape.center[1]);
     group.rotation.y = -shape.rotation;
     this.foregroundLayer.add(group);
+    this.registerCullable(group, shape.center[0], group.position.y, shape.center[1]);
 
     const halfWidth = shape.halfExtents[0];
     const halfDepth = shape.halfExtents[1];
@@ -366,7 +463,8 @@ export class CelestialWorld {
       for (const side of [-1, 1]) {
         matrix.compose(new THREE.Vector3(side * (halfWidth - 0.18), 0.43, z), quaternion, new THREE.Vector3(1, 1, 1));
         postTransforms.push(matrix.clone());
-        if (index < count && (index + section.order + (side < 0 ? 1 : 0)) % 5 !== 0) {
+        const authoredOrder = 'order' in section ? section.order : section.id.length;
+        if (index < count && (index + authoredOrder + (side < 0 ? 1 : 0)) % 5 !== 0) {
           const nextZ = THREE.MathUtils.lerp(-halfDepth + 0.62, halfDepth - 0.62, (index + 0.5) / count);
           matrix.compose(new THREE.Vector3(side * (halfWidth - 0.18), 0.66, nextZ), quaternion, new THREE.Vector3(1, 1, 1));
           railTransforms.push(matrix.clone());
@@ -397,9 +495,10 @@ export class CelestialWorld {
     }
   }
 
-  private buildCourtDetails(section: RouteSectionDefinition): void {
+  private buildCourtDetails(section: AnyRouteSection): void {
     const circle = section.walkable.find((shape): shape is Extract<RouteShape, { kind: 'circle' }> => shape.kind === 'circle');
     if (!circle) return;
+    const elevation = routeSectionElevationAt(section, circle.center);
     const columnGeometry = this.track(new THREE.CylinderGeometry(0.22, 0.34, 1.9, 7));
     const columns = new THREE.InstancedMesh(columnGeometry, this.materials.get('blackSlate'), 8);
     columns.name = `${section.id}.weatheredColumns`;
@@ -408,7 +507,7 @@ export class CelestialWorld {
       const angle = (index / 8) * Math.PI * 2;
       const radius = circle.radius + 0.18;
       matrix.compose(
-        new THREE.Vector3(circle.center[0] + Math.sin(angle) * radius, 0.88 - (index % 3) * 0.12, circle.center[1] + Math.cos(angle) * radius),
+        new THREE.Vector3(circle.center[0] + Math.sin(angle) * radius, elevation + 0.88 - (index % 3) * 0.12, circle.center[1] + Math.cos(angle) * radius),
         new THREE.Quaternion().setFromEuler(new THREE.Euler(0, angle + index * 0.19, (index % 2 === 0 ? 1 : -1) * 0.035)),
         new THREE.Vector3(1, 0.72 + (index % 3) * 0.13, 1),
       );
@@ -417,6 +516,266 @@ export class CelestialWorld {
     columns.instanceMatrix.needsUpdate = true;
     columns.castShadow = true;
     this.midgroundLayer.add(columns);
+    this.registerCullable(columns, circle.center[0], elevation, circle.center[1]);
+  }
+
+  private biomeId(section: AnyRouteSection): RouteBiomeId {
+    return 'biome' in section ? section.biome ?? 'moonless-tundra' : 'moonless-tundra';
+  }
+
+  private biomeAccent(section: AnyRouteSection): THREE.MeshStandardMaterial {
+    const biome = this.biomeId(section);
+    const existing = this.biomeAccentMaterials.get(biome);
+    if (existing) return existing;
+    const palette: Readonly<Record<RouteBiomeId, readonly [string, string]>> = {
+      'moonless-tundra': ['#aeefff', '#285c78'],
+      'drowned-cloister': ['#79efff', '#075c72'],
+      'verdant-cathedral': ['#a9ff72', '#1f7a43'],
+      'ember-basilica': ['#ffad48', '#8c210d'],
+      'amethyst-archives': ['#ed8dff', '#64159a'],
+    };
+    const [color, emissive] = palette[biome];
+    const material = new THREE.MeshStandardMaterial({
+      name: `material.biomeAccent.${biome}`,
+      color,
+      emissive,
+      emissiveIntensity: 1.35,
+      roughness: 0.28,
+      metalness: 0.42,
+    });
+    this.biomeAccentMaterials.set(biome, material);
+    this.ownedMaterials.add(material);
+    return material;
+  }
+
+  private buildBiomeEnvironment(section: AnyRouteSection): void {
+    const circle = section.walkable.find((shape): shape is Extract<RouteShape, { kind: 'circle' }> => shape.kind === 'circle');
+    if (!circle) return;
+    const biome = this.biomeId(section);
+    const elevation = routeSectionElevationAt(section, circle.center);
+    const group = new THREE.Group();
+    group.name = `${section.id}.biomeArchitecture`;
+    group.position.set(circle.center[0], elevation, circle.center[1]);
+    this.midgroundLayer.add(group);
+    this.registerCullable(group, circle.center[0], elevation, circle.center[1], 30);
+
+    const floorMaterial = this.materials.getBiomeFloor(biome);
+    const accent = this.biomeAccent(section);
+    const forwardLength = Math.hypot(section.cameraForward[0], section.cameraForward[1]) || 1;
+    const forwardX = section.cameraForward[0] / forwardLength;
+    const forwardZ = section.cameraForward[1] / forwardLength;
+    const cameraX = -forwardX;
+    const cameraZ = -forwardZ;
+    const columnHeight = biome === 'ember-basilica' ? 5.4 : biome === 'amethyst-archives' ? 4.7 : 4.15;
+    const columnGeometry = this.track(new THREE.CylinderGeometry(0.24, 0.42, columnHeight, 8));
+    const matrix = new THREE.Matrix4();
+    const columnTransforms: THREE.Matrix4[] = [];
+    for (let index = 0; index < 12; index += 1) {
+      const angle = index / 12 * Math.PI * 2;
+      const radialX = Math.sin(angle);
+      const radialZ = Math.cos(angle);
+      if (radialX * cameraX + radialZ * cameraZ > 0.16) continue;
+      const radius = circle.radius + 0.65 + (index % 3 === 0 ? 0.35 : 0);
+      matrix.compose(
+        new THREE.Vector3(radialX * radius, columnHeight * 0.48, radialZ * radius),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, angle, (index % 2 ? -1 : 1) * 0.04)),
+        new THREE.Vector3(1, 0.82 + (index % 4) * 0.06, 1),
+      );
+      columnTransforms.push(matrix.clone());
+    }
+    const columns = new THREE.InstancedMesh(columnGeometry, floorMaterial, columnTransforms.length);
+    columns.name = `${section.id}.cathedralColumns`;
+    columnTransforms.forEach((transform, index) => columns.setMatrixAt(index, transform));
+    columns.instanceMatrix.needsUpdate = true;
+    columns.castShadow = true;
+    columns.receiveShadow = true;
+    group.add(columns);
+
+    const buttressGeometry = this.track(new THREE.BoxGeometry(0.34, 2.3, 1.15));
+    const buttresses = new THREE.InstancedMesh(buttressGeometry, floorMaterial, 12);
+    buttresses.name = `${section.id}.flyingButtresses`;
+    for (let index = 0; index < 12; index += 1) {
+      const angle = index / 12 * Math.PI * 2;
+      const radius = circle.radius + 1.9;
+      matrix.compose(
+        new THREE.Vector3(Math.sin(angle) * radius, 1.15, Math.cos(angle) * radius),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, angle, Math.sin(angle) * 0.18)),
+        new THREE.Vector3(1, 1 + (index % 3) * 0.18, 1),
+      );
+      buttresses.setMatrixAt(index, matrix);
+    }
+    buttresses.instanceMatrix.needsUpdate = true;
+    buttresses.castShadow = true;
+    group.add(buttresses);
+
+    const rightX = forwardZ;
+    const rightZ = -forwardX;
+    const archPillarGeometry = this.track(new THREE.BoxGeometry(0.18, 2.8, 0.24));
+    const archRoofGeometry = this.track(new THREE.BoxGeometry(0.16, 1.35, 0.22));
+    const archPillars = new THREE.InstancedMesh(archPillarGeometry, accent, 6);
+    const archRoofs = new THREE.InstancedMesh(archRoofGeometry, accent, 6);
+    const archYaw = Math.atan2(forwardX, forwardZ);
+    let archInstance = 0;
+    for (let index = 0; index < 3; index += 1) {
+      const offset = (index - 1) * 2.05;
+      const centerX = forwardX * (circle.radius + 0.42) + rightX * offset;
+      const centerZ = forwardZ * (circle.radius + 0.42) + rightZ * offset;
+      for (const side of [-1, 1]) {
+        matrix.compose(
+          new THREE.Vector3(centerX + rightX * side * 0.72, 1.4, centerZ + rightZ * side * 0.72),
+          new THREE.Quaternion().setFromEuler(new THREE.Euler(0, archYaw, 0)),
+          new THREE.Vector3(1, 1, 1),
+        );
+        archPillars.setMatrixAt(archInstance, matrix);
+        matrix.compose(
+          new THREE.Vector3(centerX + rightX * side * 0.33, 3.2, centerZ + rightZ * side * 0.33),
+          new THREE.Quaternion().setFromEuler(new THREE.Euler(0, archYaw, -side * 0.64)),
+          new THREE.Vector3(1, 1, 1),
+        );
+        archRoofs.setMatrixAt(archInstance, matrix);
+        archInstance += 1;
+      }
+    }
+    archPillars.name = `${section.id}.pointedArchPillars`;
+    archRoofs.name = `${section.id}.pointedArchRoofs`;
+    archPillars.instanceMatrix.needsUpdate = true;
+    archRoofs.instanceMatrix.needsUpdate = true;
+    group.add(archPillars, archRoofs);
+
+    const propGeometry = this.track(
+      biome === 'verdant-cathedral'
+        ? new THREE.ConeGeometry(0.34, 2.2, 7)
+        : biome === 'amethyst-archives'
+          ? new THREE.OctahedronGeometry(0.5, 0)
+          : this.createFacetedSpireGeometry(0.42, 1.7, 7),
+    );
+    const propTransforms: THREE.Matrix4[] = [];
+    for (let index = 0; index < 22; index += 1) {
+      const angle = index / 22 * Math.PI * 2 + (section.id.length % 5) * 0.13;
+      const radialX = Math.sin(angle);
+      const radialZ = Math.cos(angle);
+      if (radialX * cameraX + radialZ * cameraZ > 0.3) continue;
+      const radius = circle.radius + 3 + (index % 5) * 0.72;
+      const height = 0.85 + (index % 4) * 0.26;
+      matrix.compose(
+        new THREE.Vector3(radialX * radius, height * 0.65 - 0.2, radialZ * radius),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, angle * 1.7, (index % 3 - 1) * 0.1)),
+        new THREE.Vector3(0.7 + (index % 3) * 0.25, height, 0.7 + ((index + 1) % 3) * 0.2),
+      );
+      propTransforms.push(matrix.clone());
+    }
+    const props = new THREE.InstancedMesh(propGeometry, biome === 'drowned-cloister' ? accent : floorMaterial, propTransforms.length);
+    props.name = `${section.id}.regionalEnvironment`;
+    propTransforms.forEach((transform, index) => props.setMatrixAt(index, transform));
+    props.instanceMatrix.needsUpdate = true;
+    props.castShadow = true;
+    props.receiveShadow = true;
+    group.add(props);
+
+    if (biome === 'drowned-cloister') this.buildDrownedSanctuary(group, circle.radius, accent);
+    else if (biome === 'verdant-cathedral') this.buildVerdantGlasshouse(group, circle.radius, accent);
+    else if (biome === 'ember-basilica') this.buildEmberNave(group, circle.radius, accent);
+    else if (biome === 'amethyst-archives') this.buildAmethystArchive(group, circle.radius, accent);
+
+    const lightColor: Readonly<Record<RouteBiomeId, string>> = {
+      'moonless-tundra': '#9defff',
+      'drowned-cloister': '#3bdcf5',
+      'verdant-cathedral': '#73ee83',
+      'ember-basilica': '#ff6b30',
+      'amethyst-archives': '#bc63ff',
+    };
+    const light = new THREE.PointLight(lightColor[biome], 3.6, circle.radius * 3.4, 2);
+    light.name = `${section.id}.biomeLight`;
+    light.position.set(0, 3.2, 0);
+    group.add(light);
+  }
+
+  private buildDrownedSanctuary(group: THREE.Group, radius: number, accent: THREE.Material): void {
+    for (let index = 0; index < 3; index += 1) {
+      const angle = (index - 1) * 0.72;
+      const bell = this.mesh(`drownedBell.${index}`, new THREE.SphereGeometry(0.48, 10, 7, 0, Math.PI * 2, 0, Math.PI * 0.62), accent, group);
+      bell.scale.set(0.82, 1.2, 0.82);
+      bell.position.set(Math.sin(angle) * (radius + 0.4), 3.35 + index * 0.28, -Math.cos(angle) * (radius + 0.35));
+      const cage = this.mesh(`bellCage.${index}`, new THREE.TorusGeometry(0.72, 0.055, 5, 20), this.materials.get('lunarSilver'), group, false);
+      cage.position.copy(bell.position);
+      cage.rotation.x = Math.PI / 2;
+    }
+  }
+
+  private buildVerdantGlasshouse(group: THREE.Group, radius: number, accent: THREE.Material): void {
+    for (let index = 0; index < 3; index += 1) {
+      const pane = this.mesh(
+        `glasshousePane.${index}`,
+        new THREE.PlaneGeometry(1.8, 3.4),
+        this.materials.get('glass'),
+        group,
+        false,
+      );
+      pane.position.set((index - 1) * 2.05, 2.05, -radius - 0.7);
+      pane.rotation.y = (index - 1) * 0.12;
+    }
+    const rootGeometry = this.track(new THREE.CylinderGeometry(0.06, 0.13, 2.8, 6));
+    const roots = new THREE.InstancedMesh(rootGeometry, accent, 14);
+    const matrix = new THREE.Matrix4();
+    for (let index = 0; index < 14; index += 1) {
+      const angle = index / 14 * Math.PI * 2;
+      matrix.compose(
+        new THREE.Vector3(Math.sin(angle) * (radius + 0.25), 1.05, Math.cos(angle) * (radius + 0.25)),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler((index % 3 - 1) * 0.3, angle, 0.2)),
+        new THREE.Vector3(1, 0.75 + (index % 4) * 0.2, 1),
+      );
+      roots.setMatrixAt(index, matrix);
+    }
+    roots.instanceMatrix.needsUpdate = true;
+    group.add(roots);
+  }
+
+  private buildEmberNave(group: THREE.Group, radius: number, accent: THREE.Material): void {
+    const rose = this.mesh('emberRoseWindow', new THREE.RingGeometry(1.15, 1.46, 20), accent, group, false);
+    rose.position.set(0, 4.5, -radius - 0.78);
+    const spokesGeometry = this.track(new THREE.BoxGeometry(0.06, 2.7, 0.06));
+    for (let index = 0; index < 8; index += 1) {
+      const spoke = new THREE.Mesh(spokesGeometry, accent);
+      spoke.name = `emberRoseSpoke.${index}`;
+      spoke.position.copy(rose.position);
+      spoke.rotation.z = index / 8 * Math.PI;
+      group.add(spoke);
+    }
+    const brazierGeometry = this.track(new THREE.CylinderGeometry(0.28, 0.42, 0.82, 8));
+    const braziers = new THREE.InstancedMesh(brazierGeometry, this.materials.get('celestialGold'), 6);
+    const matrix = new THREE.Matrix4();
+    for (let index = 0; index < 6; index += 1) {
+      const angle = index / 6 * Math.PI * 2;
+      matrix.makeTranslation(Math.sin(angle) * (radius - 0.6), 0.42, Math.cos(angle) * (radius - 0.6));
+      braziers.setMatrixAt(index, matrix);
+    }
+    braziers.instanceMatrix.needsUpdate = true;
+    group.add(braziers);
+  }
+
+  private buildAmethystArchive(group: THREE.Group, radius: number, accent: THREE.Material): void {
+    const shelfGeometry = this.track(new THREE.BoxGeometry(1.25, 0.12, 0.46));
+    const shelves = new THREE.InstancedMesh(shelfGeometry, accent, 12);
+    shelves.name = 'levitatingIndexShelves';
+    const matrix = new THREE.Matrix4();
+    for (let index = 0; index < 12; index += 1) {
+      const angle = index / 12 * Math.PI * 2;
+      const y = 1.15 + (index % 4) * 0.78;
+      matrix.compose(
+        new THREE.Vector3(Math.sin(angle) * (radius + 0.15), y, Math.cos(angle) * (radius + 0.15)),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, angle, (index % 2 ? -1 : 1) * 0.08)),
+        new THREE.Vector3(1, 1, 1),
+      );
+      shelves.setMatrixAt(index, matrix);
+    }
+    shelves.instanceMatrix.needsUpdate = true;
+    group.add(shelves);
+    for (let index = 0; index < 4; index += 1) {
+      const crystal = this.mesh(`archiveMemoryCrystal.${index}`, new THREE.OctahedronGeometry(0.46 + index * 0.06, 0), accent, group, false);
+      crystal.position.set((index - 1.5) * 2.1, 2.1 + (index % 2) * 0.8, -radius * 0.68);
+      crystal.userData.baseY = crystal.position.y;
+      this.floatingMonoliths.push(crystal);
+    }
   }
 
   private buildRouteGate(id: string, a: readonly [number, number], b: readonly [number, number], open: boolean): void {
@@ -425,10 +784,12 @@ export class CelestialWorld {
     const length = Math.hypot(dx, dz);
     const group = new THREE.Group();
     group.name = `routeGate.${id}`;
-    group.position.set((a[0] + b[0]) * 0.5, 0, (a[1] + b[1]) * 0.5);
+    const midpoint: readonly [number, number] = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+    group.position.set(midpoint[0], routeElevationAt(FIRMAMENT_ROUTE, midpoint), midpoint[1]);
     group.rotation.y = -Math.atan2(dz, dx);
     group.userData.open = open;
     this.foregroundLayer.add(group);
+    this.registerCullable(group, midpoint[0], group.position.y, midpoint[1], 32);
 
     for (const side of [-1, 1]) {
       const pier = this.mesh(
@@ -496,6 +857,7 @@ export class CelestialWorld {
     spire.name = 'spiralAstrologySchool';
     spire.position.set(9.5, 0, 49.5);
     this.midgroundLayer.add(spire);
+    this.registerCullable(spire, 9.5, 0, 49.5, 44);
     for (let tier = 0; tier < 5; tier += 1) {
       const height = 3.2 + tier * 0.28;
       const tower = this.mesh(
@@ -603,6 +965,7 @@ export class CelestialWorld {
     const finalSection = FIRMAMENT_ROUTE.sections[FIRMAMENT_ROUTE.sections.length - 1];
     observatory.position.set(finalSection.walkable[0].center[0], 0, finalSection.walkable[0].center[1]);
     this.midgroundLayer.add(observatory);
+    this.registerCullable(observatory, observatory.position.x, 0, observatory.position.z, 42);
 
     const terrace = this.mesh(
       'observatoryTerraceRing',

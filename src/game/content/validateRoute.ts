@@ -1,6 +1,9 @@
 import type {
+  BranchEncounterDefinition,
   CampaignRouteDefinition,
+  EnemySpawnDefinition,
   ObbRouteShape,
+  RouteBranchSectionDefinition,
   RouteSectionDefinition,
   RouteShape,
   Vec2Tuple,
@@ -80,7 +83,9 @@ export function routeShapeContainsPoint(shape: RouteShape, point: Vec2Tuple, rad
   return routeShapeContainsCoordinates(shape, point[0], point[1], radius);
 }
 
-function pointInSection(section: RouteSectionDefinition, point: Vec2Tuple, radius = 0): boolean {
+type AnyRouteSection = RouteSectionDefinition | RouteBranchSectionDefinition;
+
+function pointInSection(section: AnyRouteSection, point: Vec2Tuple, radius = 0): boolean {
   return section.walkable.some((shape) => routeShapeContainsPoint(shape, point, radius));
 }
 
@@ -402,10 +407,27 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
   if (route.id.trim().length === 0) issues.push({ path: 'id', message: 'Route ID must not be empty.' });
   if (route.name.trim().length === 0) issues.push({ path: 'name', message: 'Route name must not be empty.' });
 
+  const branchSections = route.branchSections ?? [];
+  const allSections: readonly AnyRouteSection[] = [...route.sections, ...branchSections];
   const sectionIds = validateUniqueIds(route.sections, 'sections', issues);
+  branchSections.forEach((section, index) => {
+    const path = `branchSections[${index}].id`;
+    if (section.id.trim().length === 0) issues.push({ path, message: 'ID must not be empty.' });
+    if (sectionIds.has(section.id)) issues.push({ path, message: `Duplicate section ID "${section.id}".` });
+    sectionIds.add(section.id);
+  });
   const gateIds = validateUniqueIds(route.gates, 'gates', issues);
   validateUniqueIds(route.checkpoints, 'checkpoints', issues);
   const encounterIds = validateUniqueIds(route.encounters, 'encounters', issues);
+  const branchEncounterIds = new Set<string>();
+  (route.branchEncounters ?? []).forEach((encounter, index) => {
+    const path = `branchEncounters[${index}].id`;
+    if (encounter.id.trim().length === 0) issues.push({ path, message: 'ID must not be empty.' });
+    if (encounterIds.has(encounter.id) || branchEncounterIds.has(encounter.id)) {
+      issues.push({ path, message: `Duplicate encounter ID "${encounter.id}".` });
+    }
+    branchEncounterIds.add(encounter.id);
+  });
   validateContiguousOrder(route.sections, 'sections.order', issues);
   validateContiguousOrder(route.checkpoints, 'checkpoints.order', issues);
   validateContiguousOrder(route.encounters, 'encounters.order', issues);
@@ -415,9 +437,8 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
   if (!finitePoint(route.start.position)) issues.push({ path: 'start.position', message: 'Start position must be finite.' });
   if (!finite(route.start.facingRadians)) issues.push({ path: 'start.facingRadians', message: 'Start facing must be finite.' });
 
-  const sectionById = new Map(route.sections.map((section) => [section.id, section]));
-  route.sections.forEach((section, index) => {
-    const path = `sections[${index}]`;
+  const sectionById = new Map(allSections.map((section) => [section.id, section]));
+  const validateSection = (section: AnyRouteSection, path: string): void => {
     if (section.name.trim().length === 0) issues.push({ path: `${path}.name`, message: 'Section name must not be empty.' });
     if (section.walkable.length === 0) issues.push({ path: `${path}.walkable`, message: 'Section needs at least one walkable shape.' });
     section.walkable.forEach((shape, shapeIndex) => validateShape(shape, `${path}.walkable[${shapeIndex}]`, issues));
@@ -428,6 +449,9 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
       if (!sectionIds.has(connectedId)) issues.push({ path: `${path}.connectsTo`, message: `Unknown section "${connectedId}".` });
       if (connectedId === section.id) issues.push({ path: `${path}.connectsTo`, message: 'A section cannot connect to itself.' });
     }
+    if (section.elevation && (!finite(section.elevation.start) || !finite(section.elevation.end))) {
+      issues.push({ path: `${path}.elevation`, message: 'Elevation endpoints must be finite.' });
+    }
     const anchorIds = validateUniqueIds(section.enemyAnchors, `${path}.enemyAnchors`, issues);
     section.enemyAnchors.forEach((anchor, anchorIndex) => {
       if (!pointInSection(section, anchor.position)) {
@@ -437,7 +461,9 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
     if (anchorIds.size !== section.enemyAnchors.length) {
       issues.push({ path: `${path}.enemyAnchors`, message: 'Enemy anchor IDs must be unique within a section.' });
     }
-  });
+  };
+  route.sections.forEach((section, index) => validateSection(section, `sections[${index}]`));
+  branchSections.forEach((section, index) => validateSection(section, `branchSections[${index}]`));
 
   const orderedSections = [...route.sections].sort((a, b) => a.order - b.order);
   for (let index = 0; index < orderedSections.length - 1; index += 1) {
@@ -451,6 +477,26 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
       issues.push({ path: `sections[${current.order}].walkable`, message: `Ordered sections "${current.id}" and "${next.id}" do not overlap.` });
     }
   }
+
+  branchSections.forEach((section, index) => {
+    section.connectsTo.forEach((connectedId) => {
+      const connected = sectionById.get(connectedId);
+      if (!connected) return;
+      if (!connected.connectsTo.includes(section.id)) {
+        issues.push({
+          path: `branchSections[${index}].connectsTo`,
+          message: `Connected sections "${section.id}" and "${connected.id}" must link both ways.`,
+        });
+      }
+      const overlaps = section.walkable.some((first) => connected.walkable.some((second) => routeShapesOverlap(first, second)));
+      if (!overlaps) {
+        issues.push({
+          path: `branchSections[${index}].walkable`,
+          message: `Connected sections "${section.id}" and "${connected.id}" do not overlap.`,
+        });
+      }
+    });
+  });
 
   const startSection = sectionById.get(route.start.sectionId);
   if (startSection && !startSection.safe) issues.push({ path: 'start.sectionId', message: 'Campaign must start in a safe section.' });
@@ -535,8 +581,131 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
       if (encounter.order !== route.encounters.length - 1) issues.push({ path: `${path}.order`, message: 'Final boss encounter must be last.' });
     }
   });
+
+  const validateBranchSpawn = (
+    encounter: BranchEncounterDefinition,
+    spawn: EnemySpawnDefinition,
+    spawnPath: string,
+  ): void => {
+    if (globalSpawnIds.has(spawn.id)) issues.push({ path: `${spawnPath}.id`, message: `Duplicate global spawn ID "${spawn.id}".` });
+    globalSpawnIds.add(spawn.id);
+    const section = sectionById.get(spawn.sectionId);
+    if (!section || !encounter.sectionIds.includes(spawn.sectionId)) {
+      issues.push({ path: `${spawnPath}.sectionId`, message: 'Spawn section must belong to its encounter.' });
+    } else if (!pointInSection(section, spawn.position)) {
+      issues.push({ path: `${spawnPath}.position`, message: 'Spawn must lie inside its section.' });
+    }
+    if (!finite(spawn.facingRadians)) issues.push({ path: `${spawnPath}.facingRadians`, message: 'Spawn facing must be finite.' });
+    if (spawn.wakeDelaySeconds !== undefined && (!finite(spawn.wakeDelaySeconds) || spawn.wakeDelaySeconds < 0)) {
+      issues.push({ path: `${spawnPath}.wakeDelaySeconds`, message: 'Wake delay must be finite and non-negative.' });
+    }
+    if (spawn.leashSectionIds.length === 0 || !spawn.leashSectionIds.includes(spawn.sectionId)) {
+      issues.push({ path: `${spawnPath}.leashSectionIds`, message: 'Leash sections must include the spawn section.' });
+    }
+    spawn.leashSectionIds.forEach((sectionId) => {
+      if (!encounter.sectionIds.includes(sectionId)) {
+        issues.push({ path: `${spawnPath}.leashSectionIds`, message: `Leash section "${sectionId}" is outside the encounter.` });
+      }
+    });
+    if (spawn.anchorId) {
+      const anchorExists = section?.enemyAnchors.some((anchor) => anchor.id === spawn.anchorId) ?? false;
+      if (!anchorExists) issues.push({ path: `${spawnPath}.anchorId`, message: 'Spawn anchor does not exist in its section.' });
+    }
+    if (spawn.role === 'boss') {
+      issues.push({ path: `${spawnPath}.role`, message: 'Branch encounters cannot contain boss-role spawns.' });
+    }
+  };
+
+  (route.branchEncounters ?? []).forEach((encounter, index) => {
+    const path = `branchEncounters[${index}]`;
+    if (encounter.name.trim().length === 0) issues.push({ path: `${path}.name`, message: 'Encounter name must not be empty.' });
+    if (encounter.sectionIds.length === 0) issues.push({ path: `${path}.sectionIds`, message: 'Branch encounter needs at least one section.' });
+    encounter.sectionIds.forEach((sectionId) => {
+      if (!sectionIds.has(sectionId)) issues.push({ path: `${path}.sectionIds`, message: `Unknown section "${sectionId}".` });
+    });
+    validateShape(encounter.activation, `${path}.activation`, issues);
+    const activationCenter = shapeCenter(encounter.activation);
+    const activationInside = encounter.sectionIds.some((sectionId) => {
+      const section = sectionById.get(sectionId);
+      return section ? pointInSection(section, activationCenter) : false;
+    });
+    if (!activationInside) issues.push({ path: `${path}.activation`, message: 'Encounter activation center must lie in one of its sections.' });
+    if (encounter.spawns.length === 0) issues.push({ path: `${path}.spawns`, message: 'Encounter must contain at least one spawn.' });
+    encounter.spawns.forEach((spawn, spawnIndex) => validateBranchSpawn(encounter, spawn, `${path}.spawns[${spawnIndex}]`));
+  });
   if (midpointBosses < 1) issues.push({ path: 'encounters', message: 'Route requires a midpoint boss.' });
   if (finalBosses !== 1) issues.push({ path: 'encounters', message: 'Route requires exactly one final boss.' });
+
+  const choices = route.choices ?? [];
+  validateUniqueIds(choices, 'choices', issues);
+  const choiceById = new Map(choices.map((choice) => [choice.id, choice]));
+  const branchEncounterById = new Map((route.branchEncounters ?? []).map((encounter) => [encounter.id, encounter]));
+  choices.forEach((choice, choiceIndex) => {
+    const path = `choices[${choiceIndex}]`;
+    const section = sectionById.get(choice.sectionId);
+    if (!section) issues.push({ path: `${path}.sectionId`, message: 'Choice section does not exist.' });
+    else if (!pointInSection(section, choice.position)) issues.push({ path: `${path}.position`, message: 'Choice position must lie inside its section.' });
+    if (!finitePoint(choice.position)) issues.push({ path: `${path}.position`, message: 'Choice position must be finite.' });
+    if (!finite(choice.activationRadius) || choice.activationRadius <= 0) {
+      issues.push({ path: `${path}.activationRadius`, message: 'Choice activation radius must be positive.' });
+    }
+    if (!gateIds.has(choice.directGateId)) issues.push({ path: `${path}.directGateId`, message: 'Direct-route gate does not exist.' });
+    if (choice.options.length !== 2) issues.push({ path: `${path}.options`, message: 'Each route choice must contain exactly two options.' });
+    const optionIds = validateUniqueIds(choice.options, `${path}.options`, issues);
+    choice.options.forEach((option, optionIndex) => {
+      const optionPath = `${path}.options[${optionIndex}]`;
+      if (!gateIds.has(option.entryGateId)) issues.push({ path: `${optionPath}.entryGateId`, message: 'Choice entry gate does not exist.' });
+      if (!gateIds.has(option.exitGateId)) issues.push({ path: `${optionPath}.exitGateId`, message: 'Choice exit gate does not exist.' });
+      const encounter = branchEncounterById.get(option.encounterId);
+      if (!encounter) issues.push({ path: `${optionPath}.encounterId`, message: 'Choice branch encounter does not exist.' });
+      else if (encounter.choiceId !== choice.id || encounter.optionId !== option.id) {
+        issues.push({ path: `${optionPath}.encounterId`, message: 'Branch encounter ownership does not match this choice option.' });
+      }
+      if (option.sectionIds.length === 0) issues.push({ path: `${optionPath}.sectionIds`, message: 'Choice option needs at least one branch section.' });
+      option.sectionIds.forEach((sectionId) => {
+        const branch = branchSections.find((candidate) => candidate.id === sectionId);
+        if (!branch) issues.push({ path: `${optionPath}.sectionIds`, message: `Unknown branch section "${sectionId}".` });
+        else if (branch.choiceId !== choice.id || branch.optionId !== option.id) {
+          issues.push({ path: `${optionPath}.sectionIds`, message: `Branch section "${sectionId}" belongs to a different choice option.` });
+        }
+      });
+      if (!finite(option.consequence.affinityDelta) || option.consequence.affinityDelta < 0) {
+        issues.push({ path: `${optionPath}.consequence.affinityDelta`, message: 'Affinity delta must be finite and non-negative.' });
+      }
+      if (!finite(option.consequence.enemyPowerMultiplier) || option.consequence.enemyPowerMultiplier <= 0) {
+        issues.push({ path: `${optionPath}.consequence.enemyPowerMultiplier`, message: 'Enemy power multiplier must be positive.' });
+      }
+    });
+    if (optionIds.size !== choice.options.length) {
+      issues.push({ path: `${path}.options`, message: 'Choice option IDs must be unique.' });
+    }
+  });
+
+  branchSections.forEach((section, index) => {
+    const choice = choiceById.get(section.choiceId);
+    if (!choice) {
+      issues.push({ path: `branchSections[${index}].choiceId`, message: 'Branch section choice does not exist.' });
+      return;
+    }
+    const option = choice.options.find((candidate) => candidate.id === section.optionId);
+    if (!option) issues.push({ path: `branchSections[${index}].optionId`, message: 'Branch section option does not exist.' });
+    else if (!option.sectionIds.includes(section.id)) {
+      issues.push({ path: `branchSections[${index}]`, message: 'Branch section is not declared by its owning choice option.' });
+    }
+  });
+
+  (route.branchEncounters ?? []).forEach((encounter, index) => {
+    const choice = choiceById.get(encounter.choiceId);
+    if (!choice) {
+      issues.push({ path: `branchEncounters[${index}].choiceId`, message: 'Branch encounter choice does not exist.' });
+      return;
+    }
+    const option = choice.options.find((candidate) => candidate.id === encounter.optionId);
+    if (!option) issues.push({ path: `branchEncounters[${index}].optionId`, message: 'Branch encounter option does not exist.' });
+    else if (option.encounterId !== encounter.id) {
+      issues.push({ path: `branchEncounters[${index}]`, message: 'Branch encounter is not declared by its owning choice option.' });
+    }
+  });
 
   route.checkpoints.forEach((checkpoint, index) => {
     const path = `checkpoints[${index}]`;
@@ -572,6 +741,23 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
   if (bridgeCount < route.requirements.minimumBridgeSections) {
     issues.push({ path: 'sections', message: `Expected at least ${route.requirements.minimumBridgeSections} bridge/causeway sections.` });
   }
+  if (route.requirements.minimumBiomeCount !== undefined) {
+    if (!Number.isInteger(route.requirements.minimumBiomeCount) || route.requirements.minimumBiomeCount <= 0) {
+      issues.push({ path: 'requirements.minimumBiomeCount', message: 'Minimum biome count must be a positive integer.' });
+    } else {
+      const biomeCount = new Set(allSections.map((section) => section.biome ?? 'moonless-tundra')).size;
+      if (biomeCount < route.requirements.minimumBiomeCount) {
+        issues.push({ path: 'sections', message: `Expected at least ${route.requirements.minimumBiomeCount} distinct biomes.` });
+      }
+    }
+  }
+  if (route.requirements.minimumChoiceCount !== undefined) {
+    if (!Number.isInteger(route.requirements.minimumChoiceCount) || route.requirements.minimumChoiceCount < 0) {
+      issues.push({ path: 'requirements.minimumChoiceCount', message: 'Minimum choice count must be a non-negative integer.' });
+    } else if (choices.length < route.requirements.minimumChoiceCount) {
+      issues.push({ path: 'choices', message: `Expected at least ${route.requirements.minimumChoiceCount} route choices.` });
+    }
+  }
   const actualRelicOrder = [...route.checkpoints].sort((a, b) => a.order - b.order).map((checkpoint) => checkpoint.relicKind);
   if (
     actualRelicOrder.length !== route.requirements.relicOrder.length ||
@@ -579,7 +765,10 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
   ) {
     issues.push({ path: 'checkpoints', message: `Relic checkpoint order must be ${route.requirements.relicOrder.join(' -> ')}.` });
   }
-  const actualEnemyKinds = new Set(route.encounters.flatMap((encounter) => encounter.spawns.map((spawn) => spawn.kind)));
+  const actualEnemyKinds = new Set([
+    ...route.encounters.flatMap((encounter) => encounter.spawns.map((spawn) => spawn.kind)),
+    ...(route.branchEncounters ?? []).flatMap((encounter) => encounter.spawns.map((spawn) => spawn.kind)),
+  ]);
   route.requirements.enemyKinds.forEach((kind) => {
     if (!actualEnemyKinds.has(kind)) issues.push({ path: 'encounters.spawns', message: `Required enemy kind "${kind}" is missing.` });
   });

@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import type { CharacterProfile } from '../src/game/CharacterProfile';
+import { CHARACTER_PROFILE_STORAGE_KEY } from '../src/game/CharacterProfileStore';
 
 type CapturedIntent = {
   type: 'start' | 'preview' | 'open-settings';
@@ -21,7 +22,7 @@ type FrontEndTestWindow = Window & {
   };
 };
 
-const STORAGE_KEY = 'last-firmament.character.v1';
+const STORAGE_KEY = CHARACTER_PROFILE_STORAGE_KEY;
 
 // These tests prove the isolated front-end contract. Game.ts is expected to own
 // the integration listener that applies preview/start profiles to the 3D runtime.
@@ -56,6 +57,15 @@ async function selectRadio(page: Page, selector: string): Promise<void> {
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
   });
+}
+
+async function setCheckbox(page: Page, selector: string, checked: boolean): Promise<void> {
+  await page.locator(selector).evaluate((element, nextChecked) => {
+    const input = element as HTMLInputElement;
+    input.checked = nextChecked;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }, checked);
 }
 
 test('boot presents a deliberate, focus-contained main menu over an inert game surface', async ({ page }) => {
@@ -168,6 +178,9 @@ test('creator emits live previews, validates, persists, and restores the complet
   await selectRadio(page, 'input[name="robeDye"][value="oxblood"]');
   await selectRadio(page, 'input[name="astralMetal"][value="celestial-gold"]');
   await selectRadio(page, 'input[name="catalyst"][value="bare-hands"]');
+  await selectRadio(page, 'input[name="origin"][value="eclipse-outcast"]');
+  await setCheckbox(page, 'input[name="startingAbilities"][value="aurora-veil"]', false);
+  await setCheckbox(page, 'input[name="startingAbilities"][value="comet-lance"]', true);
 
   await expect
     .poll(async () => (await lastIntent(page, 'preview'))?.profile)
@@ -179,6 +192,8 @@ test('creator emits live previews, validates, persists, and restores the complet
       robeDye: 'oxblood',
       astralMetal: 'celestial-gold',
       catalyst: 'bare-hands',
+      origin: 'eclipse-outcast',
+      startingAbilities: ['lunar-dart', 'comet-lance'],
     });
 
   await page.locator('#creator-save').click();
@@ -187,7 +202,7 @@ test('creator emits live previews, validates, persists, and restores the complet
 
   const persisted = await page.evaluate((key) => JSON.parse(window.localStorage.getItem(key) ?? '{}') as CharacterProfile, STORAGE_KEY);
   expect(persisted).toMatchObject({
-    schemaVersion: 1,
+    schemaVersion: 2,
     name: 'Astrid of Vesper',
     lifeStage: 'elder',
     frame: 'sturdy',
@@ -195,6 +210,8 @@ test('creator emits live previews, validates, persists, and restores the complet
     robeDye: 'oxblood',
     astralMetal: 'celestial-gold',
     catalyst: 'bare-hands',
+    origin: 'eclipse-outcast',
+    startingAbilities: ['lunar-dart', 'comet-lance'],
   });
 
   await page.reload();
@@ -207,9 +224,37 @@ test('creator emits live previews, validates, persists, and restores the complet
     'input[name="robeDye"][value="oxblood"]',
     'input[name="astralMetal"][value="celestial-gold"]',
     'input[name="catalyst"][value="bare-hands"]',
+    'input[name="origin"][value="eclipse-outcast"]',
+    'input[name="startingAbilities"][value="lunar-dart"]',
+    'input[name="startingAbilities"][value="comet-lance"]',
   ]) {
     await expect(page.locator(selector)).toBeChecked();
   }
+});
+
+test('creator keeps the starting loadout distinct and blocks fewer than two sorceries', async ({ page }) => {
+  await openFrontEnd(page);
+  await page.locator('#shape-pilgrim').click();
+
+  await expect(page.locator('#starting-ability-count')).toHaveText('2 of 2 chosen');
+  await setCheckbox(page, 'input[name="startingAbilities"][value="comet-lance"]', true);
+  await expect(page.locator('input[name="startingAbilities"][value="lunar-dart"]')).not.toBeChecked();
+  await expect(page.locator('input[name="startingAbilities"][value="aurora-veil"]')).toBeChecked();
+  await expect(page.locator('input[name="startingAbilities"][value="comet-lance"]')).toBeChecked();
+
+  await setCheckbox(page, 'input[name="startingAbilities"][value="aurora-veil"]', false);
+  await expect(page.locator('#starting-ability-count')).toHaveText('1 of 2 chosen');
+  await expect(page.locator('#starting-ability-fieldset')).toHaveAttribute('aria-invalid', 'true');
+  await expect(page.locator('#starting-ability-error')).toContainText('exactly two distinct');
+  await page.locator('#creator-begin').click();
+  await expect(page.locator('#character-creator-panel')).toBeVisible();
+  expect(await lastIntent(page, 'start')).toBeUndefined();
+
+  await setCheckbox(page, 'input[name="startingAbilities"][value="eclipse-step"]', true);
+  await expect(page.locator('#starting-ability-fieldset')).toHaveAttribute('aria-invalid', 'false');
+  await page.locator('#creator-begin').click();
+  await expect(page.locator('#front-end-layer')).toBeHidden();
+  expect((await lastIntent(page, 'start'))?.profile?.startingAbilities).toEqual(['comet-lance', 'eclipse-step']);
 });
 
 test('begin persists before dispatching start and restores gameplay interactivity', async ({ page }) => {
@@ -218,7 +263,12 @@ test('begin persists before dispatching start and restores gameplay interactivit
 
   await expect(page.locator('#front-end-layer')).toBeHidden();
   const start = await lastIntent(page, 'start');
-  expect(start?.profile).toMatchObject({ schemaVersion: 1, name: 'Unnamed Pilgrim' });
+  expect(start?.profile).toMatchObject({
+    schemaVersion: 2,
+    name: 'Unnamed Pilgrim',
+    origin: 'lunar-penitent',
+    startingAbilities: ['lunar-dart', 'aurora-veil'],
+  });
 
   const storedName = await page.evaluate((key) => {
     const raw = window.localStorage.getItem(key);

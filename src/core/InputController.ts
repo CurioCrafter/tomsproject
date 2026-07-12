@@ -4,6 +4,7 @@ export type GameAction =
   | 'melee'
   | 'lunar'
   | 'aurora'
+  | 'ability3'
   | 'dodge'
   | 'lock'
   | 'interact'
@@ -37,6 +38,7 @@ const ACTION_BY_KEY: Partial<Record<string, GameAction>> = {
   KeyJ: 'melee',
   KeyQ: 'lunar',
   KeyE: 'aurora',
+  Digit3: 'ability3',
   Tab: 'lock',
   KeyF: 'interact',
   Escape: 'pause',
@@ -49,6 +51,7 @@ const isGameAction = (value: string): value is GameAction =>
   value === 'melee' ||
   value === 'lunar' ||
   value === 'aurora' ||
+  value === 'ability3' ||
   value === 'dodge' ||
   value === 'lock' ||
   value === 'interact' ||

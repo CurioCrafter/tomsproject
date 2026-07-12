@@ -8,6 +8,10 @@ export type EnemyKind =
   | 'ashenInitiate'
   | 'astralLancer'
   | 'eclipseChorister'
+  | 'emberPenitent'
+  | 'drownedCantor'
+  | 'prismScribe'
+  | 'thornReliquary'
   | 'orreryCastellan'
   | 'eclipseArchon'
   | 'boss';
@@ -34,7 +38,19 @@ export type EnemyConfig = {
   buildPlaceholderModel?: boolean;
 };
 
-type EnemyBehavior = 'skirmisher' | 'guard' | 'caster' | 'duelist' | 'lancer' | 'chorister' | 'castellan' | 'archon';
+type EnemyBehavior =
+  | 'skirmisher'
+  | 'guard'
+  | 'caster'
+  | 'duelist'
+  | 'lancer'
+  | 'chorister'
+  | 'penitent'
+  | 'cantor'
+  | 'scribe'
+  | 'reliquary'
+  | 'castellan'
+  | 'archon';
 
 export type EnemyArchetype = {
   rank: EnemyRank;
@@ -55,9 +71,20 @@ export const ENEMY_ARCHETYPES: Readonly<Record<EnemyKind, EnemyArchetype>> = {
   ashenInitiate: { rank: 'common', behavior: 'duelist', maxHealth: 64, speed: 3.65, radius: 0.6, preferredRange: 1.5, detectionRadius: 12.5, name: 'Ashen Initiate', epithet: 'A student without a star' },
   astralLancer: { rank: 'elite', behavior: 'lancer', maxHealth: 126, speed: 4.15, radius: 0.74, preferredRange: 4.8, detectionRadius: 18, name: 'Astral Lancer', epithet: 'Keeper of the broken span' },
   eclipseChorister: { rank: 'elite', behavior: 'chorister', maxHealth: 104, speed: 1.72, radius: 0.72, preferredRange: 8.2, detectionRadius: 17, name: 'Eclipse Chorister', epithet: 'Its hymn swallows constellations' },
+  emberPenitent: { rank: 'elite', behavior: 'penitent', maxHealth: 142, speed: 3.72, radius: 0.8, preferredRange: 3.2, detectionRadius: 18.5, name: 'Ember Penitent', epithet: 'Its censer remembers the first sun' },
+  drownedCantor: { rank: 'elite', behavior: 'cantor', maxHealth: 102, speed: 1.58, radius: 0.76, preferredRange: 8.4, detectionRadius: 18, name: 'Drowned Cantor', epithet: 'A bell tolling beneath dead tides' },
+  prismScribe: { rank: 'elite', behavior: 'scribe', maxHealth: 92, speed: 2.38, radius: 0.7, preferredRange: 9.1, detectionRadius: 19, name: 'Prism Scribe', epithet: 'It indexes futures in forbidden light' },
+  thornReliquary: { rank: 'elite', behavior: 'reliquary', maxHealth: 168, speed: 1.22, radius: 0.92, preferredRange: 3.35, detectionRadius: 16.5, name: 'Thorn Reliquary', epithet: 'A saint entombed in hungry roots' },
   orreryCastellan: { rank: 'boss', behavior: 'castellan', maxHealth: 410, speed: 2.85, radius: 1.18, preferredRange: 2.6, detectionRadius: 36, name: 'The Orrery Castellan', epithet: 'Warden of the Fallen Orbits' },
   eclipseArchon: { rank: 'boss', behavior: 'archon', maxHealth: 720, speed: 2.55, radius: 1.42, preferredRange: 3.6, detectionRadius: 42, name: 'The Eclipse Archon', epithet: 'Devourer of the Returned Light' },
   boss: { rank: 'boss', behavior: 'archon', maxHealth: 620, speed: 2.55, radius: 1.38, preferredRange: 3.6, detectionRadius: 40, name: 'The Eclipse Archon', epithet: 'Devourer of the Returned Light' },
+};
+
+const ENEMY_HEALTH_BAR_HEIGHTS: Readonly<Partial<Record<EnemyKind, number>>> = {
+  emberPenitent: 2.85,
+  drownedCantor: 3.35,
+  prismScribe: 2.55,
+  thornReliquary: 3.25,
 };
 
 export class Enemy {
@@ -136,11 +163,14 @@ export class Enemy {
     this.telegraph.visible = false;
     this.group.add(this.telegraph);
 
+    const barHeight = this.archetype.rank === 'boss'
+      ? 3.6
+      : ENEMY_HEALTH_BAR_HEIGHTS[this.kind] ?? 2.05;
     const barBack = new THREE.Mesh(
       this.geometry(new THREE.PlaneGeometry(this.archetype.rank === 'boss' ? 2.4 : 1.15, 0.1)),
       this.material(new THREE.MeshBasicMaterial({ color: '#100a12', transparent: true, opacity: 0.82, depthTest: false })),
     );
-    barBack.position.set(0, this.archetype.rank === 'boss' ? 3.6 : 2.05, 0);
+    barBack.position.set(0, barHeight, 0);
     barBack.renderOrder = 4;
     this.group.add(barBack);
     this.healthFill = new THREE.Mesh(
@@ -251,14 +281,25 @@ export class Enemy {
       targetAvailable &&
       (this.archetype.behavior === 'skirmisher' ||
         this.archetype.behavior === 'caster' ||
-        this.archetype.behavior === 'chorister')
+        this.archetype.behavior === 'chorister' ||
+        this.archetype.behavior === 'cantor' ||
+        this.archetype.behavior === 'scribe')
     ) {
-      const strafe = Math.sin(elapsed * 1.8 + this.id) * 0.48;
+      const strafeStrength = this.archetype.behavior === 'scribe'
+        ? 0.66
+        : this.archetype.behavior === 'cantor'
+          ? 0.34
+          : 0.48;
+      const strafe = Math.sin(elapsed * 1.8 + this.id) * strafeStrength;
       const x = this.tempDirection.x;
       this.tempDirection.x = x * movement - this.tempDirection.z * strafe;
       this.tempDirection.z = this.tempDirection.z * movement + x * strafe;
     } else if (this.archetype.behavior === 'lancer' && distance > preferred) {
       this.tempDirection.multiplyScalar(1.22);
+    } else if (this.archetype.behavior === 'penitent' && distance > preferred) {
+      this.tempDirection.multiplyScalar(1.34);
+    } else if (this.archetype.behavior === 'reliquary' && distance < preferred * 0.72) {
+      this.tempDirection.multiplyScalar(-0.2);
     } else {
       this.tempDirection.multiplyScalar(movement);
     }
@@ -324,6 +365,10 @@ export class Enemy {
       duelist: 0.48,
       lancer: 0.86,
       chorister: 1.08,
+      penitent: 0.74,
+      cantor: 1.18,
+      scribe: 0.88,
+      reliquary: 1.02,
       castellan: this.phase === 3 ? 0.92 : 0.76,
       archon: this.phase === 3 ? 1.05 : 0.82,
     };
@@ -373,6 +418,54 @@ export class Enemy {
         count = 3;
       }
       this.attackCooldown = 2.6;
+    } else if (this.archetype.behavior === 'penitent') {
+      if (this.attackIndex % 3 === 0) {
+        kind = 'burst';
+        damage = 22;
+        radius = 2.45;
+        position = this.attackPoint;
+      } else {
+        damage = 27;
+        radius = 3.75;
+      }
+      this.attackCooldown = 2.05;
+    } else if (this.archetype.behavior === 'cantor') {
+      if (this.attackIndex % 3 === 0) {
+        kind = 'nova';
+        damage = 13;
+        radius = 0.24;
+        count = 8;
+      } else {
+        kind = 'burst';
+        damage = 20;
+        radius = 2.75;
+        position = this.attackPoint;
+      }
+      this.attackCooldown = 2.95;
+    } else if (this.archetype.behavior === 'scribe') {
+      if (this.attackIndex % 4 === 0) {
+        kind = 'burst';
+        damage = 21;
+        radius = 2.15;
+        position = this.attackPoint;
+      } else {
+        kind = 'projectile';
+        damage = 14;
+        radius = 0.22;
+        count = this.attackIndex % 2 === 0 ? 5 : 3;
+      }
+      this.attackCooldown = 2.35;
+    } else if (this.archetype.behavior === 'reliquary') {
+      if (this.attackIndex % 3 === 0) {
+        kind = 'nova';
+        damage = 15;
+        radius = 0.28;
+        count = 6;
+      } else {
+        damage = 24;
+        radius = 3.05;
+      }
+      this.attackCooldown = 2.4;
     } else if (this.archetype.behavior === 'castellan') {
       const pattern = this.attackIndex % (this.phase + 2);
       damage = 21 + this.phase * 3;
@@ -415,6 +508,8 @@ export class Enemy {
   private canAttack(distance: number): boolean {
     if (this.archetype.behavior === 'guard' || this.archetype.behavior === 'duelist') return distance <= 2.25;
     if (this.archetype.behavior === 'lancer') return distance <= 8.5;
+    if (this.archetype.behavior === 'penitent') return distance <= 4.5;
+    if (this.archetype.behavior === 'reliquary') return distance <= 4.15;
     if (this.isBoss && this.attackIndex % 3 === 1) return distance <= 4.8;
     return distance <= 11.5;
   }
@@ -434,9 +529,13 @@ export class Enemy {
         ? 3.8 + this.phase * 0.45
         : this.archetype.behavior === 'caster' || this.archetype.behavior === 'chorister'
           ? 2.4
-          : this.archetype.behavior === 'lancer'
-            ? 2.25
-            : 1.45;
+          : this.archetype.behavior === 'cantor' || this.archetype.behavior === 'scribe'
+            ? 2.7
+            : this.archetype.behavior === 'reliquary'
+              ? 2.15
+              : this.archetype.behavior === 'lancer' || this.archetype.behavior === 'penitent'
+                ? 2.25
+                : 1.45;
       this.telegraph.scale.setScalar(targetScale * (1 + Math.sin(elapsed * 13) * 0.06));
       (this.telegraph.material as THREE.MeshBasicMaterial).opacity = 0.48 + Math.sin(elapsed * 18) * 0.22;
     }
@@ -476,7 +575,12 @@ export class Enemy {
       shield.castShadow = true;
       this.group.add(shield);
     }
-    if (this.archetype.behavior === 'caster' || this.archetype.behavior === 'chorister') {
+    if (
+      this.archetype.behavior === 'caster' ||
+      this.archetype.behavior === 'chorister' ||
+      this.archetype.behavior === 'cantor' ||
+      this.archetype.behavior === 'scribe'
+    ) {
       const crown = new THREE.Mesh(this.geometry(new THREE.TorusGeometry(0.42, 0.055, 6, 18)), this.accentMaterial);
       crown.position.y = 2.12;
       crown.rotation.x = Math.PI / 2;
@@ -503,6 +607,10 @@ export class Enemy {
     if (this.kind === 'ashenInitiate') return { body: '#332d31', accent: '#cf835c', emissive: '#2a1012' };
     if (this.kind === 'astralLancer') return { body: '#293746', accent: '#8fd9e8', emissive: '#0b3040' };
     if (this.kind === 'eclipseChorister') return { body: '#2c1836', accent: '#e05594', emissive: '#3d0a2a' };
+    if (this.kind === 'emberPenitent') return { body: '#4b231d', accent: '#ff9b3d', emissive: '#6e1708' };
+    if (this.kind === 'drownedCantor') return { body: '#173d4d', accent: '#8eeaff', emissive: '#063d55' };
+    if (this.kind === 'prismScribe') return { body: '#39255e', accent: '#ee9dff', emissive: '#3e0c69' };
+    if (this.kind === 'thornReliquary') return { body: '#244638', accent: '#9be45b', emissive: '#0d4a28' };
     if (this.kind === 'orreryCastellan') return { body: '#202733', accent: '#dcad58', emissive: '#48220b' };
     return { body: '#17111f', accent: '#e64a88', emissive: '#35051c' };
   }
