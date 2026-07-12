@@ -177,7 +177,7 @@ export class FrontEndController {
   }
 
   private bindInterface(): void {
-    this.requireElement<HTMLButtonElement>('#begin-pilgrimage').addEventListener('click', () => this.begin(this.profile));
+    this.requireElement<HTMLButtonElement>('#begin-pilgrimage').addEventListener('click', () => this.showCreator());
     this.requireElement<HTMLButtonElement>('#shape-pilgrim').addEventListener('click', () => this.showCreator());
     const settingsButton = this.requireElement<HTMLButtonElement>('#front-settings-button');
     settingsButton.addEventListener('click', () => {
@@ -190,8 +190,8 @@ export class FrontEndController {
     this.requireElement<HTMLButtonElement>('#creator-save').addEventListener('click', () => this.saveDraft(false));
 
     // Keep the old test/bootstrap affordance functional while the visible timed
-    // title veil is retired.
-    this.requireElement<HTMLButtonElement>('#enter-game').addEventListener('click', () => this.begin(this.profile));
+    // title veil is retired, without allowing it to bypass character confirmation.
+    this.requireElement<HTMLButtonElement>('#enter-game').addEventListener('click', () => this.showCreator());
 
     this.form.addEventListener('input', (event) => this.handleFormEdit(event));
     this.form.addEventListener('change', (event) => this.handleFormEdit(event));
@@ -205,14 +205,6 @@ export class FrontEndController {
     window.addEventListener(HUD_MENU_STATE_EVENT, this.onHudMenuState);
   }
 
-  private begin(profile: CharacterProfile): void {
-    const result = saveCharacterProfile(profile);
-    this.profile = result.profile;
-    this.renderProfileSummary();
-    this.dispatchIntent('start', this.profile);
-    this.hide();
-  }
-
   private saveDraft(begin: boolean): void {
     if (!this.validateName()) return;
     if (!this.validateStartingAbilities()) return;
@@ -224,12 +216,14 @@ export class FrontEndController {
     if (!result.persisted) {
       this.creatorStatus.dataset.state = 'error';
       this.creatorStatus.textContent =
-        'This browser could not save your pilgrim. Your choices remain for this session; choose Back, then Begin to play without persistence.';
+        'This browser could not save your pilgrim. Your choices remain available for this session.';
       this.dispatchIntent('preview', this.profile);
-      return;
+      if (!begin) return;
     }
-    delete this.creatorStatus.dataset.state;
-    this.creatorStatus.textContent = `${this.profile.name} has been written into the school ledger.`;
+    if (result.persisted) {
+      delete this.creatorStatus.dataset.state;
+      this.creatorStatus.textContent = `${this.profile.name} has been written into the school ledger.`;
+    }
     if (begin) {
       this.dispatchIntent('start', this.profile);
       this.hide();

@@ -6,6 +6,7 @@ import type {
   RouteBranchSectionDefinition,
   RouteSectionDefinition,
   RouteShape,
+  ThickSegmentCollider,
   Vec2Tuple,
 } from './RouteTypes';
 
@@ -17,6 +18,10 @@ export type RouteValidationIssue = {
 const EPSILON = 0.000_001;
 
 export const ROUTE_GATE_PARTITION_PLAYER_RADIUS = 0.52;
+export const ROUTE_MIN_GATE_SEPARATION = 0.9;
+export const ROUTE_MIN_SPAWN_SEPARATION = 1.75;
+export const ROUTE_INTERACTION_CLEARANCE = 0.5;
+export const ROUTE_MIN_SPAWN_CHECKPOINT_DISTANCE = 2.5;
 
 export type RouteGatePartitionProbeOptions = {
   /** Grid spacing in world units. Lower values are more precise and more expensive. */
@@ -161,6 +166,67 @@ function pointToSegmentDistanceSquared(
   const dx = x - closestX;
   const dz = z - closestZ;
   return dx * dx + dz * dz;
+}
+
+function segmentOrientation(a: Vec2Tuple, b: Vec2Tuple, c: Vec2Tuple): number {
+  return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+}
+
+function pointOnSegment(point: Vec2Tuple, a: Vec2Tuple, b: Vec2Tuple): boolean {
+  return (
+    Math.abs(segmentOrientation(a, b, point)) <= EPSILON &&
+    point[0] >= Math.min(a[0], b[0]) - EPSILON &&
+    point[0] <= Math.max(a[0], b[0]) + EPSILON &&
+    point[1] >= Math.min(a[1], b[1]) - EPSILON &&
+    point[1] <= Math.max(a[1], b[1]) + EPSILON
+  );
+}
+
+function segmentsIntersect(first: ThickSegmentCollider, second: ThickSegmentCollider): boolean {
+  const firstA = segmentOrientation(first.a, first.b, second.a);
+  const firstB = segmentOrientation(first.a, first.b, second.b);
+  const secondA = segmentOrientation(second.a, second.b, first.a);
+  const secondB = segmentOrientation(second.a, second.b, first.b);
+  if (
+    ((firstA > EPSILON && firstB < -EPSILON) || (firstA < -EPSILON && firstB > EPSILON)) &&
+    ((secondA > EPSILON && secondB < -EPSILON) || (secondA < -EPSILON && secondB > EPSILON))
+  ) return true;
+  return (
+    pointOnSegment(second.a, first.a, first.b) ||
+    pointOnSegment(second.b, first.a, first.b) ||
+    pointOnSegment(first.a, second.a, second.b) ||
+    pointOnSegment(first.b, second.a, second.b)
+  );
+}
+
+export function gateColliderSeparation(first: ThickSegmentCollider, second: ThickSegmentCollider): number {
+  if (segmentsIntersect(first, second)) return 0;
+  return Math.sqrt(Math.min(
+    pointToSegmentDistanceSquared(first.a[0], first.a[1], second.a, second.b),
+    pointToSegmentDistanceSquared(first.b[0], first.b[1], second.a, second.b),
+    pointToSegmentDistanceSquared(second.a[0], second.a[1], first.a, first.b),
+    pointToSegmentDistanceSquared(second.b[0], second.b[1], first.a, first.b),
+  ));
+}
+
+function pointDistance(first: Vec2Tuple, second: Vec2Tuple): number {
+  return Math.hypot(first[0] - second[0], first[1] - second[1]);
+}
+
+function validateSpawnSeparation(
+  spawns: readonly EnemySpawnDefinition[],
+  path: string,
+  issues: RouteValidationIssue[],
+): void {
+  for (let first = 0; first < spawns.length; first += 1) {
+    for (let second = first + 1; second < spawns.length; second += 1) {
+      if (pointDistance(spawns[first].position, spawns[second].position) + EPSILON >= ROUTE_MIN_SPAWN_SEPARATION) continue;
+      issues.push({
+        path: `${path}.spawns[${second}].position`,
+        message: `Encounter spawns must remain at least ${ROUTE_MIN_SPAWN_SEPARATION} world units apart.`,
+      });
+    }
+  }
 }
 
 function routeGridBounds(
@@ -506,16 +572,34 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
 
   route.gates.forEach((gate, index) => {
     const path = `gates[${index}]`;
-    if (!sectionIds.has(gate.sectionId)) issues.push({ path: `${path}.sectionId`, message: 'Gate section does not exist.' });
+    const section = sectionById.get(gate.sectionId);
+    if (!section) issues.push({ path: `${path}.sectionId`, message: 'Gate section does not exist.' });
     if (!finitePoint(gate.collider.a) || !finitePoint(gate.collider.b)) {
       issues.push({ path: `${path}.collider`, message: 'Gate endpoints must be finite.' });
     }
     const length = Math.hypot(gate.collider.b[0] - gate.collider.a[0], gate.collider.b[1] - gate.collider.a[1]);
     if (length <= EPSILON) issues.push({ path: `${path}.collider`, message: 'Gate segment must have non-zero length.' });
+    const midpoint: Vec2Tuple = [
+      (gate.collider.a[0] + gate.collider.b[0]) * 0.5,
+      (gate.collider.a[1] + gate.collider.b[1]) * 0.5,
+    ];
+    if (section && !pointInSection(section, midpoint)) {
+      issues.push({ path: `${path}.collider`, message: 'Gate midpoint must lie inside its declared section.' });
+    }
     if (!finite(gate.collider.thickness) || gate.collider.thickness <= 0) {
       issues.push({ path: `${path}.collider.thickness`, message: 'Gate thickness must be positive.' });
     }
   });
+  for (let first = 0; first < route.gates.length; first += 1) {
+    for (let second = first + 1; second < route.gates.length; second += 1) {
+      const separation = gateColliderSeparation(route.gates[first].collider, route.gates[second].collider);
+      if (separation + EPSILON >= ROUTE_MIN_GATE_SEPARATION) continue;
+      issues.push({
+        path: `gates[${second}].collider`,
+        message: `Gate colliders must remain at least ${ROUTE_MIN_GATE_SEPARATION} world units apart in plan view.`,
+      });
+    }
+  }
 
   const encounterById = new Map(route.encounters.map((encounter) => [encounter.id, encounter]));
   const globalSpawnIds = new Set<string>();
@@ -564,6 +648,7 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
       }
       if (spawn.role === 'boss') bossRoleCount += 1;
     });
+    validateSpawnSeparation(encounter.spawns, path, issues);
 
     if (encounter.boss === 'none' && bossRoleCount > 0) issues.push({ path: `${path}.boss`, message: 'Non-boss encounter cannot contain a boss-role spawn.' });
     if (encounter.boss !== 'none' && bossRoleCount !== 1) issues.push({ path: `${path}.spawns`, message: 'Boss encounter must contain exactly one boss-role spawn.' });
@@ -632,6 +717,7 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
     if (!activationInside) issues.push({ path: `${path}.activation`, message: 'Encounter activation center must lie in one of its sections.' });
     if (encounter.spawns.length === 0) issues.push({ path: `${path}.spawns`, message: 'Encounter must contain at least one spawn.' });
     encounter.spawns.forEach((spawn, spawnIndex) => validateBranchSpawn(encounter, spawn, `${path}.spawns[${spawnIndex}]`));
+    validateSpawnSeparation(encounter.spawns, path, issues);
   });
   if (midpointBosses < 1) issues.push({ path: 'encounters', message: 'Route requires a midpoint boss.' });
   if (finalBosses !== 1) issues.push({ path: 'encounters', message: 'Route requires exactly one final boss.' });
@@ -649,6 +735,26 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
     if (!finite(choice.activationRadius) || choice.activationRadius <= 0) {
       issues.push({ path: `${path}.activationRadius`, message: 'Choice activation radius must be positive.' });
     }
+    route.checkpoints.forEach((checkpoint) => {
+      const minimum = choice.activationRadius + checkpoint.activationRadius + ROUTE_INTERACTION_CLEARANCE;
+      if (pointDistance(choice.position, checkpoint.position) + EPSILON >= minimum) return;
+      issues.push({
+        path: `${path}.position`,
+        message: `Choice activation must not overlap checkpoint "${checkpoint.id}" activation.`,
+      });
+    });
+    const bufferedChoice: RouteShape = {
+      kind: 'circle',
+      center: choice.position,
+      radius: choice.activationRadius + ROUTE_INTERACTION_CLEARANCE,
+    };
+    route.encounters.forEach((encounter) => {
+      if (!routeShapesOverlap(bufferedChoice, encounter.activation)) return;
+      issues.push({
+        path: `${path}.position`,
+        message: `Choice activation must not overlap encounter "${encounter.id}" activation.`,
+      });
+    });
     if (!gateIds.has(choice.directGateId)) issues.push({ path: `${path}.directGateId`, message: 'Direct-route gate does not exist.' });
     if (choice.options.length !== 2) issues.push({ path: `${path}.options`, message: 'Each route choice must contain exactly two options.' });
     const optionIds = validateUniqueIds(choice.options, `${path}.options`, issues);
@@ -719,6 +825,14 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
     if (!encounterIds.has(checkpoint.unlocksAfterEncounterId)) {
       issues.push({ path: `${path}.unlocksAfterEncounterId`, message: 'Checkpoint unlock encounter does not exist.' });
     }
+    const allEncounters = [...route.encounters, ...(route.branchEncounters ?? [])];
+    allEncounters.forEach((encounter) => encounter.spawns.forEach((spawn) => {
+      if (pointDistance(checkpoint.position, spawn.position) + EPSILON >= ROUTE_MIN_SPAWN_CHECKPOINT_DISTANCE) return;
+      issues.push({
+        path: `${path}.position`,
+        message: `Checkpoint must remain at least ${ROUTE_MIN_SPAWN_CHECKPOINT_DISTANCE} world units from spawn "${spawn.id}".`,
+      });
+    }));
     const unlockEncounter = encounterById.get(checkpoint.unlocksAfterEncounterId);
     if (unlockEncounter && index > 0) {
       const previous = route.checkpoints[index - 1];

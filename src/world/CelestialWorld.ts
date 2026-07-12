@@ -27,6 +27,13 @@ type DistanceCullable = Readonly<{
   maxDistance: number;
 }>;
 
+const BRANCH_CONTROLLED_GATE_IDS = new Set<string>(
+  (FIRMAMENT_ROUTE.choices ?? []).flatMap((choice) => [
+    choice.directGateId,
+    ...choice.options.flatMap((option) => [option.entryGateId, option.exitGateId]),
+  ]),
+);
+
 export class CelestialWorld {
   readonly root = new THREE.Group();
   readonly playLayer = new THREE.Group();
@@ -202,8 +209,10 @@ export class CelestialWorld {
 
     this.gateVisuals.forEach((gate) => {
       const portcullis = gate.getObjectByName('gatePortcullis');
+      const ward = gate.getObjectByName('gateWard');
       const seal = gate.getObjectByName('gateSeal');
       const open = Boolean(gate.userData.open);
+      if (ward) ward.visible = !open;
       if (portcullis) portcullis.position.y = THREE.MathUtils.damp(portcullis.position.y, open ? 5.35 : 0.08, 7, delta);
       if (seal instanceof THREE.Mesh && seal.material instanceof THREE.MeshBasicMaterial) {
         seal.material.opacity = THREE.MathUtils.damp(seal.material.opacity, open ? 0 : 0.42, 8, delta);
@@ -326,7 +335,16 @@ export class CelestialWorld {
       if ('biome' in section && section.biome) this.buildBiomeEnvironment(section);
     }
 
-    for (const gate of FIRMAMENT_ROUTE.gates) this.buildRouteGate(gate.id, gate.collider.a, gate.collider.b, gate.initialState === 'open');
+    for (const gate of FIRMAMENT_ROUTE.gates) {
+      this.buildRouteGate(
+        gate.id,
+        gate.sectionId,
+        gate.collider.a,
+        gate.collider.b,
+        gate.initialState === 'open',
+        BRANCH_CONTROLLED_GATE_IDS.has(gate.id) ? 'ward' : 'portcullis',
+      );
+    }
     this.buildSchoolSpire();
   }
 
@@ -778,18 +796,64 @@ export class CelestialWorld {
     }
   }
 
-  private buildRouteGate(id: string, a: readonly [number, number], b: readonly [number, number], open: boolean): void {
+  private buildRouteGate(
+    id: string,
+    sectionId: string,
+    a: readonly [number, number],
+    b: readonly [number, number],
+    open: boolean,
+    variant: 'portcullis' | 'ward',
+  ): void {
     const dx = b[0] - a[0];
     const dz = b[1] - a[1];
     const length = Math.hypot(dx, dz);
     const group = new THREE.Group();
     group.name = `routeGate.${id}`;
     const midpoint: readonly [number, number] = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
-    group.position.set(midpoint[0], routeElevationAt(FIRMAMENT_ROUTE, midpoint), midpoint[1]);
+    const section = FIRMAMENT_ROUTE_ALL_SECTIONS.find((candidate) => candidate.id === sectionId);
+    const elevation = section ? routeSectionElevationAt(section, midpoint) : routeElevationAt(FIRMAMENT_ROUTE, midpoint);
+    group.position.set(midpoint[0], elevation, midpoint[1]);
     group.rotation.y = -Math.atan2(dz, dx);
     group.userData.open = open;
+    group.userData.variant = variant;
     this.foregroundLayer.add(group);
     this.registerCullable(group, midpoint[0], group.position.y, midpoint[1], 32);
+
+    if (variant === 'ward') {
+      const ward = new THREE.Group();
+      ward.name = 'gateWard';
+      ward.visible = !open;
+      group.add(ward);
+
+      const markerGeometry = this.track(new THREE.BoxGeometry(0.22, 1.25, 0.28));
+      for (const side of [-1, 1]) {
+        const marker = new THREE.Mesh(markerGeometry, this.materials.get('moonstone'));
+        marker.name = `gateWardMarker.${side}`;
+        marker.position.set(side * length * 0.5, 0.62, 0);
+        marker.castShadow = true;
+        ward.add(marker);
+      }
+
+      const sealMaterial = new THREE.MeshBasicMaterial({
+        color: '#63e6db',
+        transparent: true,
+        opacity: open ? 0 : 0.3,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+      });
+      this.ownedMaterials.add(sealMaterial);
+      const seal = this.mesh(
+        'gateSeal',
+        new THREE.PlaneGeometry(Math.max(0.8, length - 0.2), 1.45),
+        sealMaterial,
+        ward,
+        false,
+      );
+      seal.position.set(0, 0.78, -0.08);
+      this.gateVisuals.set(id, group);
+      return;
+    }
 
     for (const side of [-1, 1]) {
       const pier = this.mesh(

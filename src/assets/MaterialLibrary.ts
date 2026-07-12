@@ -162,14 +162,12 @@ export class MaterialLibrary {
         metalness: 0.06,
         clearcoat: 0.75,
       }),
-      glass: new THREE.MeshPhysicalMaterial({
+      glass: new THREE.MeshBasicMaterial({
         name: 'material.glass',
         color: '#7898b5',
         transparent: true,
         opacity: 0.28,
         depthWrite: false,
-        roughness: 0.08,
-        metalness: 0.05,
         side: THREE.DoubleSide,
       }),
       runeLight: new THREE.MeshBasicMaterial({

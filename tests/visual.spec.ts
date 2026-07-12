@@ -55,6 +55,8 @@ test('renders a nonblank interactive game canvas', async ({ page }, testInfo) =>
   await page.goto('/');
   await expect(page.locator('#game-canvas')).toBeVisible();
   await page.locator('#begin-pilgrimage').click();
+  await expect(page.locator('#character-creator-panel')).toBeVisible();
+  await page.locator('#creator-begin').click();
   await expect(page.locator('#front-end-layer')).toBeHidden();
   await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 10);
 

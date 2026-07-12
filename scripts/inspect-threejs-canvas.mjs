@@ -104,13 +104,15 @@ async function main() {
   const begin = page.locator('#begin-pilgrimage');
   if (await begin.isVisible().catch(() => false)) {
     await begin.click();
-    await page.locator('#front-end-layer').waitFor({ state: 'hidden', timeout: 2_000 }).catch(() => undefined);
   } else {
     // Keep the compatibility hook for inspecting older deployed builds.
     const enter = page.locator('#enter-game');
     await enter.evaluate((element) => element.click()).catch(() => undefined);
-    await page.locator('#title-veil').waitFor({ state: 'hidden', timeout: 2_000 }).catch(() => undefined);
   }
+  const confirmPilgrim = page.locator('#creator-begin');
+  if (await confirmPilgrim.isVisible().catch(() => false)) await confirmPilgrim.click();
+  await page.locator('#front-end-layer').waitFor({ state: 'hidden', timeout: 5_000 }).catch(() => undefined);
+  await page.locator('#title-veil').waitFor({ state: 'hidden', timeout: 2_000 }).catch(() => undefined);
   if (args.state === 'boundary') {
     await page.keyboard.down('KeyS');
     await page.waitForTimeout(1_200);

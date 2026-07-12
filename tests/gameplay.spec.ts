@@ -30,12 +30,14 @@ type TestHooks = {
 async function enterGame(page: Page): Promise<void> {
   await page.goto('/');
   await expect(page.locator('#game-canvas')).toBeVisible();
+  await page.locator('#begin-pilgrimage').click();
+  await expect(page.locator('#character-creator-panel')).toBeVisible();
+  await page.locator('#creator-begin').click();
+  await expect(page.locator('#front-end-layer')).toBeHidden();
+  await expect(page.locator('#title-veil')).toBeHidden();
   await page.waitForFunction(
     () => ((window as unknown as { __THREE_GAME_DIAGNOSTICS__?: Diagnostics }).__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 10,
   );
-  await page.locator('#enter-game').evaluate((element) => (element as HTMLButtonElement).click());
-  await expect(page.locator('#front-end-layer')).toBeHidden();
-  await expect(page.locator('#title-veil')).toBeHidden();
   await expect.poll(async () => (await diagnostics(page)).phase).toBe('exploration');
 }
 

@@ -39,6 +39,7 @@ interface Window {
     claimAvailableCheckpoint(): void;
     showEncounter(encounterId: string): void;
     showSection(sectionId: string): void;
+    showChoice(choiceId: string): void;
     chooseBranch(choiceId: string, optionId: string): void;
     activateBranchEncounter(encounterId: string): void;
     defeatActiveBranchEncounter(): void;

@@ -1,16 +1,18 @@
 #!/usr/bin/env node
-import { chromium } from '@playwright/test';
+import { chromium, webkit } from '@playwright/test';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const url = process.argv[2] ?? 'http://127.0.0.1:4197';
 const durationMs = Number(process.argv[3] ?? 120_000);
+const browserName = process.argv[4] ?? 'chromium';
+if (!['chromium', 'webkit'].includes(browserName)) throw new Error(`Unsupported browser: ${browserName}`);
 const outDir = 'artifacts/soak-playtest';
 const directions = ['KeyW', 'KeyD', 'KeyS', 'KeyA'];
 const actions = ['KeyJ', 'KeyQ', 'KeyJ', 'Space', 'KeyE', 'KeyJ'];
 
 await mkdir(outDir, { recursive: true });
-const browser = await chromium.launch();
+const browser = await (browserName === 'webkit' ? webkit : chromium).launch();
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 const consoleErrors = [];
 const pageErrors = [];
@@ -25,11 +27,13 @@ await page.goto(url, { waitUntil: 'domcontentloaded' });
 const begin = page.locator('#begin-pilgrimage');
 if (await begin.isVisible().catch(() => false)) {
   await begin.click();
-  await page.locator('#front-end-layer').waitFor({ state: 'hidden', timeout: 2_000 }).catch(() => undefined);
 } else {
   await page.locator('#enter-game').evaluate((element) => element.click());
-  await page.locator('#title-veil').waitFor({ state: 'hidden', timeout: 2_000 }).catch(() => undefined);
 }
+const confirmPilgrim = page.locator('#creator-begin');
+if (await confirmPilgrim.isVisible().catch(() => false)) await confirmPilgrim.click();
+await page.locator('#front-end-layer').waitFor({ state: 'hidden', timeout: 5_000 }).catch(() => undefined);
+await page.locator('#title-veil').waitFor({ state: 'hidden', timeout: 2_000 }).catch(() => undefined);
 await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 10);
 
 const startedAt = Date.now();
@@ -69,6 +73,7 @@ const screenshotPath = path.join(outDir, 'final.png');
 await page.screenshot({ path: screenshotPath, fullPage: true });
 const report = {
   url,
+  browserName,
   requestedDurationMs: durationMs,
   elapsedMs: Date.now() - startedAt,
   ticks: tick,
@@ -83,6 +88,7 @@ await browser.close();
 
 console.log(JSON.stringify({
   elapsedMs: report.elapsedMs,
+  browserName,
   ticks: tick,
   sampleCount: samples.length,
   finalPhase: final?.phase,

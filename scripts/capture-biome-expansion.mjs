@@ -25,6 +25,7 @@ for (const [biome, encounterId] of captures) {
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto(url, { waitUntil: 'networkidle' });
   await page.locator('#begin-pilgrimage').click();
+  await page.locator('#creator-begin').click();
   await page.locator('#front-end-layer').waitFor({ state: 'hidden' });
   await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 8);
   await page.evaluate((id) => window.__CELESTIAL_GAME_TEST__?.activateBranchEncounter(id), encounterId);

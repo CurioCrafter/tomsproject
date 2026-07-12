@@ -1,11 +1,20 @@
 import { expect, test } from '@playwright/test';
 import * as THREE from 'three';
 import { FIRMAMENT_ROUTE, FIRMAMENT_ROUTE_WALKABLE } from '../src/game/content/FirmamentRoute';
-import { getAllRouteSections, routeSectionElevationAt } from '../src/game/content/RouteGeometry';
+import {
+  getAllRouteSections,
+  routeElevationAtClosest,
+  routeSectionElevationAt,
+} from '../src/game/content/RouteGeometry';
 import type { CampaignRouteDefinition, EncounterDefinition } from '../src/game/content/RouteTypes';
 import {
   probeRouteGatePartitions,
+  gateColliderSeparation,
   ROUTE_GATE_PARTITION_PLAYER_RADIUS,
+  ROUTE_INTERACTION_CLEARANCE,
+  ROUTE_MIN_GATE_SEPARATION,
+  ROUTE_MIN_SPAWN_CHECKPOINT_DISTANCE,
+  ROUTE_MIN_SPAWN_SEPARATION,
   validateRouteDefinition,
 } from '../src/game/content/validateRoute';
 import { CollisionSystem } from '../src/systems/CollisionSystem';
@@ -109,6 +118,64 @@ test('the authored campaign contains five biomes, four two-arm choices, vertical
   }
 });
 
+test('gates, interactions, and encounter spawns keep authored clearance', () => {
+  for (let first = 0; first < FIRMAMENT_ROUTE.gates.length; first += 1) {
+    for (let second = first + 1; second < FIRMAMENT_ROUTE.gates.length; second += 1) {
+      const a = FIRMAMENT_ROUTE.gates[first];
+      const b = FIRMAMENT_ROUTE.gates[second];
+      expect(
+        gateColliderSeparation(a.collider, b.collider),
+        `${a.id} and ${b.id} must not intersect or nest`,
+      ).toBeGreaterThanOrEqual(ROUTE_MIN_GATE_SEPARATION);
+    }
+  }
+
+  for (const choice of FIRMAMENT_ROUTE.choices ?? []) {
+    for (const checkpoint of FIRMAMENT_ROUTE.checkpoints) {
+      const distance = Math.hypot(
+        choice.position[0] - checkpoint.position[0],
+        choice.position[1] - checkpoint.position[1],
+      );
+      expect(distance, `${choice.id} must not compete with ${checkpoint.id}`).toBeGreaterThanOrEqual(
+        choice.activationRadius + checkpoint.activationRadius + ROUTE_INTERACTION_CLEARANCE,
+      );
+    }
+  }
+
+  const encounters = [...FIRMAMENT_ROUTE.encounters, ...(FIRMAMENT_ROUTE.branchEncounters ?? [])];
+  for (const encounter of encounters) {
+    for (let first = 0; first < encounter.spawns.length; first += 1) {
+      for (let second = first + 1; second < encounter.spawns.length; second += 1) {
+        const a = encounter.spawns[first];
+        const b = encounter.spawns[second];
+        expect(
+          Math.hypot(a.position[0] - b.position[0], a.position[1] - b.position[1]),
+          `${a.id} and ${b.id} must not spawn on each other`,
+        ).toBeGreaterThanOrEqual(ROUTE_MIN_SPAWN_SEPARATION);
+      }
+    }
+  }
+
+  for (const checkpoint of FIRMAMENT_ROUTE.checkpoints) {
+    for (const encounter of encounters) {
+      for (const spawn of encounter.spawns) {
+        expect(
+          Math.hypot(checkpoint.position[0] - spawn.position[0], checkpoint.position[1] - spawn.position[1]),
+          `${spawn.id} must not spawn on ${checkpoint.id}`,
+        ).toBeGreaterThanOrEqual(ROUTE_MIN_SPAWN_CHECKPOINT_DISTANCE);
+      }
+    }
+  }
+});
+
+test('stacked route elevation stays on the current authored surface', () => {
+  const section = getAllRouteSections(FIRMAMENT_ROUTE).find((candidate) => candidate.id === 'graveglass-crypt');
+  expect(section).toBeDefined();
+  const point = [4, 14.2] as const;
+  const ownerElevation = routeSectionElevationAt(section!, point);
+  expect(routeElevationAtClosest(FIRMAMENT_ROUTE, point, ownerElevation)).toBeCloseTo(ownerElevation, 5);
+});
+
 test('the runtime player collider can traverse every ordered section when seals are open', () => {
   const collision = new CollisionSystem();
   collision.configureRouteCollision(
@@ -206,5 +273,34 @@ test('route validation rejects a gate whose endpoints leave a walkable bypass', 
   expect(issues).toContainEqual({
     path: 'gates[4].collider',
     message: 'Closed gate "eclipse-seal" does not form a valid partition of the player-walkable route union.',
+  });
+});
+
+test('route validation rejects intersecting gates and coincident encounter spawns', () => {
+  const overlappingRoute: CampaignRouteDefinition = {
+    ...FIRMAMENT_ROUTE,
+    gates: FIRMAMENT_ROUTE.gates.map((gate, index) => (
+      index === 1 ? { ...gate, collider: { ...FIRMAMENT_ROUTE.gates[0].collider } } : gate
+    )),
+    encounters: FIRMAMENT_ROUTE.encounters.map((encounter, encounterIndex) => (
+      encounterIndex === 0
+        ? {
+            ...encounter,
+            spawns: encounter.spawns.map((spawn, spawnIndex) => (
+              spawnIndex === 1 ? { ...spawn, position: encounter.spawns[0].position } : spawn
+            )),
+          }
+        : encounter
+    )),
+  };
+
+  const issues = validateRouteDefinition(overlappingRoute);
+  expect(issues).toContainEqual({
+    path: 'gates[1].collider',
+    message: `Gate colliders must remain at least ${ROUTE_MIN_GATE_SEPARATION} world units apart in plan view.`,
+  });
+  expect(issues).toContainEqual({
+    path: 'encounters[0].spawns[1].position',
+    message: `Encounter spawns must remain at least ${ROUTE_MIN_SPAWN_SEPARATION} world units apart.`,
   });
 });

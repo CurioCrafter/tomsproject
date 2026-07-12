@@ -30,6 +30,8 @@ async function diagnostics(page: Page): Promise<ExpansionDiagnostics> {
 async function begin(page: Page): Promise<void> {
   await page.goto('/');
   await page.locator('#begin-pilgrimage').click();
+  await expect(page.locator('#character-creator-panel')).toBeVisible();
+  await page.locator('#creator-begin').click();
   await expect(page.locator('#front-end-layer')).toBeHidden();
   await expect.poll(async () => (await diagnostics(page)).phase).toBe('exploration');
 }
@@ -42,7 +44,7 @@ test('a real fork seals its exit, grants procedural loot, and unlocks the third 
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await begin(page);
 
-  await page.evaluate(() => window.__CELESTIAL_GAME_TEST__?.showSection('moon-court'));
+  await page.evaluate(() => window.__CELESTIAL_GAME_TEST__?.showChoice('drowned-vow'));
   await expect.poll(async () => (await diagnostics(page)).route.availableChoice?.id).toBe('drowned-vow');
   await expect(page.locator('#route-choice-prompt')).toBeVisible();
   await page.locator('[data-route-option-id="still-the-bells"]').click();

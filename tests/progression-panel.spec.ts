@@ -18,6 +18,8 @@ async function beginGame(page: Page): Promise<void> {
   await page.goto('/');
   await page.waitForFunction(() => Boolean((window as AtlasTestWindow).__LAST_FIRMAMENT_ATLAS__));
   await page.locator('#begin-pilgrimage').click();
+  await expect(page.locator('#character-creator-panel')).toBeVisible();
+  await page.locator('#creator-begin').click();
   await expect(page.locator('#front-end-layer')).toBeHidden();
   await expect.poll(() => page.evaluate(() => (window as AtlasTestWindow).__THREE_GAME_DIAGNOSTICS__?.phase)).toBe('exploration');
 }

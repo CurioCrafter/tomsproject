@@ -257,9 +257,18 @@ test('creator keeps the starting loadout distinct and blocks fewer than two sorc
   expect((await lastIntent(page, 'start'))?.profile?.startingAbilities).toEqual(['comet-lance', 'eclipse-step']);
 });
 
-test('begin persists before dispatching start and restores gameplay interactivity', async ({ page }) => {
+test('begin requires character confirmation before dispatching start and restores gameplay interactivity', async ({ page }, testInfo) => {
   await openFrontEnd(page);
   await page.locator('#begin-pilgrimage').click();
+
+  await expect(page.locator('#character-creator-panel')).toBeVisible();
+  await expect(page.locator('#character-name')).toBeFocused();
+  expect(await lastIntent(page, 'start')).toBeUndefined();
+  await page.locator('#creator-back').click();
+  await expect(page.locator('#main-menu-panel')).toBeVisible();
+  expect(await lastIntent(page, 'start')).toBeUndefined();
+  await page.locator('#begin-pilgrimage').click();
+  await page.locator('#creator-begin').click();
 
   await expect(page.locator('#front-end-layer')).toBeHidden();
   const start = await lastIntent(page, 'start');
@@ -276,8 +285,11 @@ test('begin persists before dispatching start and restores gameplay interactivit
   }, STORAGE_KEY);
   expect(storedName).toBe('Unnamed Pilgrim');
 
-  for (const selector of ['#game-canvas', '#hud', '#touch-controls']) {
-    expect(await page.locator(selector).evaluate((element) => (element as HTMLElement).inert)).toBe(false);
+  const interactiveSurfaces = testInfo.project.name.includes('mobile')
+    ? ['#game-canvas', '#hud', '#touch-controls']
+    : ['#game-canvas', '#hud'];
+  for (const selector of interactiveSurfaces) {
+    expect(await page.locator(selector).evaluate((element) => (element as HTMLElement).inert), `${selector} inert state`).toBe(false);
   }
 });
 
@@ -333,8 +345,18 @@ test('failed profile persistence is reported without losing the session draft', 
   await page.locator('#creator-back').click();
   await expect(page.locator('#front-profile-name')).toHaveText('Session Seer');
   await page.locator('#begin-pilgrimage').click();
+  await expect(page.locator('#character-creator-panel')).toBeVisible();
+  await page.locator('#creator-begin').click();
   await expect(page.locator('#front-end-layer')).toBeHidden();
   expect((await lastIntent(page, 'start'))?.profile?.name).toBe('Session Seer');
+});
+
+test('the legacy enter hook cannot bypass mandatory character confirmation', async ({ page }) => {
+  await openFrontEnd(page);
+  await page.locator('#enter-game').evaluate((element) => (element as HTMLButtonElement).click());
+
+  await expect(page.locator('#character-creator-panel')).toBeVisible();
+  expect(await lastIntent(page, 'start')).toBeUndefined();
 });
 
 test('creator controls retain practical targets and fit portrait and short landscape viewports', async ({ page }) => {

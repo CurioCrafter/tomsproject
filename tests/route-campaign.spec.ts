@@ -45,6 +45,8 @@ test('the pilgrimage gates encounters, commits the midpoint boss, and reaches fi
   test.skip(testInfo.project.name.includes('mobile'), 'One deterministic campaign proof is sufficient.');
   await page.goto('/');
   await page.locator('#begin-pilgrimage').click();
+  await expect(page.locator('#character-creator-panel')).toBeVisible();
+  await page.locator('#creator-begin').click();
   await expect(page.locator('#front-end-layer')).toBeHidden();
   await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 10);
 

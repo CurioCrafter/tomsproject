@@ -68,3 +68,22 @@ export function routeElevationAt(route: CampaignRouteDefinition, point: Vec2Tupl
   // player from dipping beneath an upper stair or balcony connection.
   return Math.max(...sections.map((section) => routeSectionElevationAt(section, point)));
 }
+
+/**
+ * Resolves stacked walkable surfaces without snapping a moving body onto the
+ * highest nearby stair or balcony. The caller supplies its current height, so
+ * the surface it is already following wins until it actually leaves it.
+ */
+export function routeElevationAtClosest(
+  route: CampaignRouteDefinition,
+  point: Vec2Tuple,
+  referenceElevation: number,
+): number {
+  const sections = getAllRouteSections(route).filter((section) => pointInRouteSection(section, point, 0.08));
+  if (sections.length === 0) return 0;
+  return sections
+    .map((section) => routeSectionElevationAt(section, point))
+    .reduce((closest, elevation) => (
+      Math.abs(elevation - referenceElevation) < Math.abs(closest - referenceElevation) ? elevation : closest
+    ));
+}
