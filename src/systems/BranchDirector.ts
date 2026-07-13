@@ -20,6 +20,7 @@ export type BranchDirectorSnapshot = Readonly<{
   version: 1;
   selections: readonly Readonly<{ choiceId: string; optionId: string }>[];
   activeEncounterId: string | null;
+  remainingEnemyCount: number;
   completedEncounterIds: readonly string[];
   defeatedSpawnIds: readonly string[];
   gates: readonly GateStateSnapshot[];
@@ -58,6 +59,7 @@ export class BranchDirector {
   private readonly encounters: readonly BranchEncounterDefinition[];
   private readonly choiceById = new Map<string, RouteChoiceDefinition>();
   private readonly encounterById = new Map<string, BranchEncounterDefinition>();
+  private readonly routeShapesByEncounterId = new Map<string, readonly RouteShape[]>();
   private readonly encounterBySpawnId = new Map<string, string>();
   private readonly selections = new Map<string, string>();
   private readonly completedEncounterIds = new Set<string>();
@@ -67,7 +69,18 @@ export class BranchDirector {
   constructor(private readonly route: CampaignRouteDefinition) {
     this.choices = route.choices ?? [];
     this.encounters = route.branchEncounters ?? [];
-    this.choices.forEach((choice) => this.choiceById.set(choice.id, choice));
+    const sectionById = new Map(
+      [...route.sections, ...(route.branchSections ?? [])].map((section) => [section.id, section] as const),
+    );
+    this.choices.forEach((choice) => {
+      this.choiceById.set(choice.id, choice);
+      choice.options.forEach((option) => {
+        this.routeShapesByEncounterId.set(
+          option.encounterId,
+          option.sectionIds.flatMap((sectionId) => sectionById.get(sectionId)?.walkable ?? []),
+        );
+      });
+    });
     this.encounters.forEach((encounter) => {
       this.encounterById.set(encounter.id, encounter);
       encounter.spawns.forEach((spawn) => this.encounterBySpawnId.set(spawn.id, encounter.id));
@@ -80,7 +93,27 @@ export class BranchDirector {
   }
 
   get objective(): string | null {
-    return this.activeEncounter?.objective ?? null;
+    const active = this.activeEncounter;
+    if (active) {
+      const remaining = this.remainingEnemyCount;
+      return `Ward sealed — ${remaining} ${remaining === 1 ? 'foe remains' : 'foes remain'}`;
+    }
+    const pending = this.pendingEncounter;
+    return pending ? `Follow the opened side path to ${pending.name}` : null;
+  }
+
+  get remainingEnemyCount(): number {
+    const active = this.activeEncounter;
+    return active ? active.spawns.filter((spawn) => !this.defeatedSpawnIds.has(spawn.id)).length : 0;
+  }
+
+  get pendingEncounter(): BranchEncounterDefinition | null {
+    for (const choice of this.choices) {
+      const option = this.getSelectedOption(choice.id);
+      if (!option || this.completedEncounterIds.has(option.encounterId)) continue;
+      return this.encounterById.get(option.encounterId) ?? null;
+    }
+    return null;
   }
 
   reset(): void {
@@ -121,7 +154,15 @@ export class BranchDirector {
       const option = this.getSelectedOption(choice.id);
       if (!option || this.completedEncounterIds.has(option.encounterId)) continue;
       const encounter = this.encounterById.get(option.encounterId);
-      if (!encounter || !shapeIntersectsCircle(encounter.activation, point, radius)) continue;
+      if (!encounter) continue;
+      const enteredEncounter = shapeIntersectsCircle(encounter.activation, point, radius)
+        || (
+          !choiceIntersectsCircle(choice, point, radius)
+          && (this.routeShapesByEncounterId.get(encounter.id) ?? []).some(
+            (shape) => shapeIntersectsCircle(shape, point, radius)
+          )
+        );
+      if (!enteredEncounter) continue;
       this.activeEncounterId = encounter.id;
       this.defeatedSpawnIds.clear();
       return encounter.id;
@@ -177,6 +218,7 @@ export class BranchDirector {
         .filter((choice) => this.selections.has(choice.id))
         .map((choice) => ({ choiceId: choice.id, optionId: this.selections.get(choice.id) as string })),
       activeEncounterId: this.activeEncounterId,
+      remainingEnemyCount: this.remainingEnemyCount,
       completedEncounterIds: this.encounters.filter((encounter) => this.completedEncounterIds.has(encounter.id)).map((encounter) => encounter.id),
       defeatedSpawnIds: [...this.defeatedSpawnIds],
       gates: this.getGateOverrides(),

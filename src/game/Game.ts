@@ -253,13 +253,14 @@ export class Game {
     this.applyProgressionBuild();
     this.nearbyChoiceId = null;
     this.syncRouteState();
+    const branchEncounter = (FIRMAMENT_ROUTE.branchEncounters ?? []).find((encounter) => encounter.id === option.encounterId);
     this.hud.showDiscovery({
       id: `route-choice-${detail.choiceId}`,
       visible: true,
       kicker: choice?.name ?? 'A path is chosen',
       title: option.label,
-      detail: option.consequence.rewardLabel,
-      duration: 2200,
+      detail: `The straight ward stays sealed. Follow the opened side path${branchEncounter ? ` to ${branchEncounter.name}` : ''}.`,
+      duration: 4200,
     });
     this.emitAudio('confirm', 0.9);
     this.publishDiagnostics(true);
@@ -1450,8 +1451,8 @@ export class Game {
     if (this.phase === 'victory') return 'The Eclipse Archon is defeated; the firmament remembers';
     const activeBoss = this.getActiveBoss();
     if (this.phase === 'boss' && activeBoss) return `Defeat ${activeBoss.displayName} — phase ${activeBoss.phase}`;
-    const activeBranch = this.branchDirector.activeEncounter;
-    if (activeBranch) return activeBranch.objective;
+    const branchObjective = this.branchDirector.objective;
+    if (branchObjective) return branchObjective;
     const choice = this.nearbyChoiceId
       ? (FIRMAMENT_ROUTE.choices ?? []).find((candidate) => candidate.id === this.nearbyChoiceId)
       : null;

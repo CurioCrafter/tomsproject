@@ -215,73 +215,113 @@ test('every fork keeps both arms sealed until selection and opens its exit only 
   const encounterById = new Map((FIRMAMENT_ROUTE.branchEncounters ?? []).map((encounter) => [encounter.id, encounter]));
   expect(choices).toHaveLength(4);
 
-  choices.forEach((choice, choiceIndex) => {
-    const director = new BranchDirector(FIRMAMENT_ROUTE);
-    const selected = choice.options[choiceIndex % choice.options.length];
-    const unselected = choice.options.find((option) => option.id !== selected.id);
-    const initialGates = Object.fromEntries(director.getGateOverrides().map((gate) => [gate.id, gate.state]));
+  choices.forEach((choice) => {
+    choice.options.forEach((selected) => {
+      const director = new BranchDirector(FIRMAMENT_ROUTE);
+      const unselected = choice.options.find((option) => option.id !== selected.id);
+      const initialGates = Object.fromEntries(director.getGateOverrides().map((gate) => [gate.id, gate.state]));
 
-    expect(initialGates[choice.directGateId], `${choice.id} direct route starts sealed`).toBe('closed');
-    for (const option of choice.options) {
-      expect(initialGates[option.entryGateId], `${choice.id}/${option.id} entry starts sealed`).toBe('closed');
-      expect(initialGates[option.exitGateId], `${choice.id}/${option.id} exit starts sealed`).toBe('closed');
-    }
+      expect(initialGates[choice.directGateId], `${choice.id} direct route starts sealed`).toBe('closed');
+      for (const option of choice.options) {
+        expect(initialGates[option.entryGateId], `${choice.id}/${option.id} entry starts sealed`).toBe('closed');
+        expect(initialGates[option.exitGateId], `${choice.id}/${option.id} exit starts sealed`).toBe('closed');
+      }
 
-    expect(director.selectOption(choice.id, selected.id)).toEqual(selected);
-    const selectedGates = Object.fromEntries(director.getGateOverrides().map((gate) => [gate.id, gate.state]));
-    expect(selectedGates[selected.entryGateId]).toBe('open');
-    expect(selectedGates[selected.exitGateId]).toBe('closed');
-    expect(selectedGates[choice.directGateId]).toBe('closed');
-    if (!unselected) throw new Error(`Choice ${choice.id} did not expose a second route arm.`);
-    expect(selectedGates[unselected.entryGateId]).toBe('closed');
-    expect(selectedGates[unselected.exitGateId]).toBe('closed');
+      expect(director.selectOption(choice.id, selected.id)).toEqual(selected);
+      const selectedGates = Object.fromEntries(director.getGateOverrides().map((gate) => [gate.id, gate.state]));
+      expect(selectedGates[selected.entryGateId]).toBe('open');
+      expect(selectedGates[selected.exitGateId]).toBe('closed');
+      expect(selectedGates[choice.directGateId]).toBe('closed');
+      if (!unselected) throw new Error(`Choice ${choice.id} did not expose a second route arm.`);
+      expect(selectedGates[unselected.entryGateId]).toBe('closed');
+      expect(selectedGates[unselected.exitGateId]).toBe('closed');
 
-    const encounter = encounterById.get(selected.encounterId);
-    if (!encounter) throw new Error(`Missing selected encounter ${selected.encounterId}.`);
-    expect(director.activateSelectedEncounterAt(encounter.activation.center)).toBe(encounter.id);
-    expect(director.getEncounterState(encounter.id)).toBe('active');
-    expect(encounter.spawns.every((spawn) => director.isEnemyEnabled(spawn.id))).toBe(true);
+      const encounter = encounterById.get(selected.encounterId);
+      if (!encounter) throw new Error(`Missing selected encounter ${selected.encounterId}.`);
+      expect(director.activateSelectedEncounterAt(encounter.activation.center)).toBe(encounter.id);
+      expect(director.getEncounterState(encounter.id)).toBe('active');
+      expect(director.remainingEnemyCount).toBe(encounter.spawns.length);
+      expect(encounter.spawns.every((spawn) => director.isEnemyEnabled(spawn.id))).toBe(true);
 
-    encounter.spawns.slice(0, -1).forEach((spawn) => {
-      expect(director.markEnemyDefeated(spawn.id)).toMatchObject({
+      encounter.spawns.slice(0, -1).forEach((spawn, defeatedIndex) => {
+        expect(director.markEnemyDefeated(spawn.id)).toMatchObject({
+          accepted: true,
+          encounterCompleted: false,
+          encounterId: encounter.id,
+          choiceId: choice.id,
+        });
+        const partialGates = Object.fromEntries(director.getGateOverrides().map((gate) => [gate.id, gate.state]));
+        expect(partialGates[selected.exitGateId]).toBe('closed');
+        expect(partialGates[choice.directGateId]).toBe('closed');
+        expect(director.remainingEnemyCount).toBe(encounter.spawns.length - defeatedIndex - 1);
+        expect(director.getSnapshot().remainingEnemyCount).toBe(director.remainingEnemyCount);
+      });
+
+      const finalSpawn = encounter.spawns.at(-1);
+      if (!finalSpawn) throw new Error(`Encounter ${encounter.id} did not contain enemies.`);
+      expect(director.markEnemyDefeated(finalSpawn.id)).toMatchObject({
         accepted: true,
-        encounterCompleted: false,
+        encounterCompleted: true,
         encounterId: encounter.id,
         choiceId: choice.id,
       });
-      const partialGates = Object.fromEntries(director.getGateOverrides().map((gate) => [gate.id, gate.state]));
-      expect(partialGates[selected.exitGateId]).toBe('closed');
-      expect(partialGates[choice.directGateId]).toBe('closed');
+      expect(director.getEncounterState(encounter.id)).toBe('cleared');
+      expect(director.remainingEnemyCount).toBe(0);
+
+      const completedSnapshot = director.getSnapshot();
+      const completedGates = Object.fromEntries(completedSnapshot.gates.map((gate) => [gate.id, gate.state]));
+      expect(completedGates[selected.entryGateId]).toBe('open');
+      expect(completedGates[selected.exitGateId]).toBe('open');
+      expect(completedGates[choice.directGateId]).toBe('open');
+      expect(completedGates[unselected.entryGateId]).toBe('closed');
+      expect(completedGates[unselected.exitGateId]).toBe('closed');
+      expect(completedSnapshot.selections).toContainEqual({ choiceId: choice.id, optionId: selected.id });
+      expect(completedSnapshot.completedEncounterIds).toContain(encounter.id);
+
+      director.restoreAfterDeath();
+      const restoredSnapshot = director.getSnapshot();
+      expect(restoredSnapshot.activeEncounterId).toBeNull();
+      expect(restoredSnapshot.defeatedSpawnIds).toEqual([]);
+      expect(restoredSnapshot.selections).toEqual(completedSnapshot.selections);
+      expect(restoredSnapshot.completedEncounterIds).toEqual(completedSnapshot.completedEncounterIds);
+      expect(restoredSnapshot.gates).toEqual(completedSnapshot.gates);
     });
-
-    const finalSpawn = encounter.spawns.at(-1);
-    if (!finalSpawn) throw new Error(`Encounter ${encounter.id} did not contain enemies.`);
-    expect(director.markEnemyDefeated(finalSpawn.id)).toMatchObject({
-      accepted: true,
-      encounterCompleted: true,
-      encounterId: encounter.id,
-      choiceId: choice.id,
-    });
-    expect(director.getEncounterState(encounter.id)).toBe('cleared');
-
-    const completedSnapshot = director.getSnapshot();
-    const completedGates = Object.fromEntries(completedSnapshot.gates.map((gate) => [gate.id, gate.state]));
-    expect(completedGates[selected.entryGateId]).toBe('open');
-    expect(completedGates[selected.exitGateId]).toBe('open');
-    expect(completedGates[choice.directGateId]).toBe('open');
-    expect(completedGates[unselected.entryGateId]).toBe('closed');
-    expect(completedGates[unselected.exitGateId]).toBe('closed');
-    expect(completedSnapshot.selections).toContainEqual({ choiceId: choice.id, optionId: selected.id });
-    expect(completedSnapshot.completedEncounterIds).toContain(encounter.id);
-
-    director.restoreAfterDeath();
-    const restoredSnapshot = director.getSnapshot();
-    expect(restoredSnapshot.activeEncounterId).toBeNull();
-    expect(restoredSnapshot.defeatedSpawnIds).toEqual([]);
-    expect(restoredSnapshot.selections).toEqual(completedSnapshot.selections);
-    expect(restoredSnapshot.completedEncounterIds).toEqual(completedSnapshot.completedEncounterIds);
-    expect(restoredSnapshot.gates).toEqual(completedSnapshot.gates);
   });
+});
+
+test('every selected branch encounter activates after the player commits to its route', () => {
+  const sectionById = new Map((FIRMAMENT_ROUTE.branchSections ?? []).map((section) => [section.id, section]));
+  const encounterById = new Map((FIRMAMENT_ROUTE.branchEncounters ?? []).map((encounter) => [encounter.id, encounter]));
+
+  for (const choice of FIRMAMENT_ROUTE.choices ?? []) {
+    for (const option of choice.options) {
+      const director = new BranchDirector(FIRMAMENT_ROUTE);
+      const encounter = encounterById.get(option.encounterId);
+      const section = encounter ? sectionById.get(encounter.sectionIds[0]) : null;
+      const entrySection = sectionById.get(option.sectionIds[0]);
+      const arena = section?.walkable[0];
+      const entry = entrySection?.walkable[0];
+      if (!encounter || !entry || !arena || arena.kind !== 'circle' || encounter.activation.kind !== 'circle') {
+        throw new Error(`Expected authored branch entry, arena, and activation for ${choice.id}/${option.id}.`);
+      }
+      const perimeterDistance = Math.min(arena.radius - 0.1, encounter.activation.radius + 0.25);
+      const perimeterPoint = [arena.center[0] + perimeterDistance, arena.center[1]] as const;
+      expect(perimeterDistance, `${encounter.id} perimeter point must sit outside its legacy trigger`).toBeGreaterThan(
+        encounter.activation.radius,
+      );
+
+      expect(director.selectOption(choice.id, option.id)).toEqual(option);
+      expect(director.objective).toContain(encounter.name);
+      expect(director.activateSelectedEncounterAt(choice.position), `${encounter.id} must not activate inside the choice prompt`).toBeNull();
+      expect(
+        director.activateSelectedEncounterAt(entry.center),
+        `${encounter.id} must activate once the player commits to its entry section`,
+      ).toBe(encounter.id);
+      director.restoreAfterDeath();
+      expect(director.activateSelectedEncounterAt(perimeterPoint), `${encounter.id} must activate on arena entry`).toBe(encounter.id);
+      expect(director.getEncounterState(encounter.id)).toBe('active');
+    }
+  }
 });
 
 test('legacy v1 profiles migrate to v2 defaults and malformed new fields sanitize independently', () => {

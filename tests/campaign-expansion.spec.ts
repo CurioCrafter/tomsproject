@@ -4,6 +4,7 @@ test.setTimeout(60_000);
 
 type ExpansionDiagnostics = {
   phase: string;
+  objective: string;
   player: { focus: number; position: { x: number; y: number; z: number } };
   comprehension: { lunar: { uses: number }; aurora: { uses: number } };
   progression: {
@@ -15,7 +16,7 @@ type ExpansionDiagnostics = {
   route: {
     gateStates: Record<string, 'open' | 'closed'>;
     availableChoice: { id: string } | null;
-    branch: { activeEncounterId: string | null; completedEncounterIds: readonly string[] };
+    branch: { activeEncounterId: string | null; remainingEnemyCount: number; completedEncounterIds: readonly string[] };
   };
 };
 
@@ -54,13 +55,18 @@ test('a real fork seals its exit, grants procedural loot, and unlocks the third 
   expect(state.route.gateStates['graveglass-entry']).toBe('closed');
   expect(state.route.gateStates['drowned-belfry-exit']).toBe('closed');
   expect(state.route.gateStates['drowned-direct-seal']).toBe('closed');
+  expect(state.objective).toContain('Follow the opened side path');
 
   await page.evaluate(() => window.__CELESTIAL_GAME_TEST__?.activateBranchEncounter('drowned-belfry-cantors'));
   await expect.poll(async () => (await diagnostics(page)).route.branch.activeEncounterId).toBe('drowned-belfry-cantors');
+  state = await diagnostics(page);
+  expect(state.route.branch.remainingEnemyCount).toBe(3);
+  expect(state.objective).toBe('Ward sealed — 3 foes remain');
   await page.evaluate(() => window.__CELESTIAL_GAME_TEST__?.defeatActiveBranchEncounter());
   await expect.poll(async () => (await diagnostics(page)).route.branch.completedEncounterIds).toContain('drowned-belfry-cantors');
   await expect.poll(async () => Boolean((await diagnostics(page)).progression.pendingOffer)).toBe(true);
   state = await diagnostics(page);
+  expect(state.route.branch.remainingEnemyCount).toBe(0);
   expect(state.route.gateStates['drowned-belfry-exit']).toBe('open');
   expect(state.route.gateStates['drowned-direct-seal']).toBe('open');
 
