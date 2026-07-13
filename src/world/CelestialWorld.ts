@@ -33,6 +33,12 @@ const BRANCH_CONTROLLED_GATE_IDS = new Set<string>(
     ...choice.options.flatMap((option) => [option.entryGateId, option.exitGateId]),
   ]),
 );
+const BRANCH_OPTION_GATE_OWNERS = new Map<string, Readonly<{ choiceId: string; optionId: string }>>(
+  (FIRMAMENT_ROUTE.choices ?? []).flatMap((choice) => choice.options.flatMap((option) => [
+    [option.entryGateId, { choiceId: choice.id, optionId: option.id }] as const,
+    [option.exitGateId, { choiceId: choice.id, optionId: option.id }] as const,
+  ])),
+);
 
 export class CelestialWorld {
   readonly root = new THREE.Group();
@@ -55,6 +61,7 @@ export class CelestialWorld {
   private readonly observatoryMechanism = new THREE.Group();
   private readonly floatingMonoliths: THREE.Object3D[] = [];
   private readonly gateVisuals = new Map<string, THREE.Group>();
+  private readonly branchSectionVisuals = new Map<string, THREE.Object3D[]>();
   private readonly biomeAccentMaterials = new Map<RouteBiomeId, THREE.MeshStandardMaterial>();
   private readonly distanceCullables: DistanceCullable[] = [];
   private readonly focusPosition = new THREE.Vector3();
@@ -198,7 +205,8 @@ export class CelestialWorld {
     for (const entry of this.distanceCullables) {
       const dx = entry.center.x - this.focusPosition.x;
       const dz = entry.center.z - this.focusPosition.z;
-      entry.object.visible = dx * dx + dz * dz <= entry.maxDistance * entry.maxDistance;
+      const branchVisible = entry.object.userData.branchRouteVisible !== false;
+      entry.object.visible = branchVisible && dx * dx + dz * dz <= entry.maxDistance * entry.maxDistance;
     }
 
     this.floatingMonoliths.forEach((monolith, index) => {
@@ -213,7 +221,11 @@ export class CelestialWorld {
       const seal = gate.getObjectByName('gateSeal');
       const open = Boolean(gate.userData.open);
       if (ward) ward.visible = !open;
-      if (portcullis) portcullis.position.y = THREE.MathUtils.damp(portcullis.position.y, open ? 5.35 : 0.08, 7, delta);
+      if (portcullis) {
+        if (!open) portcullis.visible = true;
+        portcullis.position.y = THREE.MathUtils.damp(portcullis.position.y, open ? 3.65 : 0.08, 7, delta);
+        if (open && portcullis.position.y >= 3.45) portcullis.visible = false;
+      }
       if (seal instanceof THREE.Mesh && seal.material instanceof THREE.MeshBasicMaterial) {
         seal.material.opacity = THREE.MathUtils.damp(seal.material.opacity, open ? 0 : 0.42, 8, delta);
         seal.visible = seal.material.opacity > 0.015;
@@ -225,6 +237,24 @@ export class CelestialWorld {
     for (const state of states) {
       const gate = this.gateVisuals.get(state.id);
       if (gate) gate.userData.open = state.state === 'open';
+    }
+  }
+
+  setBranchSelections(selections: readonly Readonly<{ choiceId: string; optionId: string }>[]): void {
+    const selectedByChoice = new Map(selections.map((selection) => [selection.choiceId, selection.optionId]));
+    for (const section of FIRMAMENT_ROUTE.branchSections ?? []) {
+      const visible = selectedByChoice.get(section.choiceId) === section.optionId;
+      for (const object of this.branchSectionVisuals.get(section.id) ?? []) {
+        object.userData.branchRouteVisible = visible;
+        object.visible = visible;
+      }
+    }
+    for (const [gateId, owner] of BRANCH_OPTION_GATE_OWNERS) {
+      const gate = this.gateVisuals.get(gateId);
+      if (!gate) continue;
+      const visible = selectedByChoice.get(owner.choiceId) === owner.optionId;
+      gate.userData.branchRouteVisible = visible;
+      gate.visible = visible;
     }
   }
 
@@ -323,7 +353,9 @@ export class CelestialWorld {
     // remain visible rather than being occluded by the old flat backdrop.
     chasm.position.set(0, -6.8, -10.5);
 
+    const routeLayers = [this.playLayer, this.foregroundLayer, this.midgroundLayer, this.farLayer] as const;
     for (const section of FIRMAMENT_ROUTE_ALL_SECTIONS) {
+      const childCounts = routeLayers.map((layer) => layer.children.length);
       section.walkable.forEach((shape, shapeIndex) => this.buildRouteSectionShape(section, shape, shapeIndex));
       if (section.kind === 'bridge' || section.kind === 'causeway' || section.kind === 'processional') {
         section.walkable.forEach((shape) => {
@@ -333,6 +365,14 @@ export class CelestialWorld {
         this.buildCourtDetails(section);
       }
       if ('biome' in section && section.biome) this.buildBiomeEnvironment(section);
+      if ('choiceId' in section) {
+        const visuals = routeLayers.flatMap((layer, index) => layer.children.slice(childCounts[index]));
+        visuals.forEach((object) => {
+          object.userData.branchRouteVisible = false;
+          object.visible = false;
+        });
+        this.branchSectionVisuals.set(section.id, visuals);
+      }
     }
 
     for (const gate of FIRMAMENT_ROUTE.gates) {
@@ -411,7 +451,9 @@ export class CelestialWorld {
     const forwardLength = Math.hypot(section.cameraForward[0], section.cameraForward[1]) || 1;
     const forwardX = section.cameraForward[0] / forwardLength;
     const forwardZ = section.cameraForward[1] / forwardLength;
-    const depth = shape.halfExtents[1] * 2;
+    const landingDepth = THREE.MathUtils.clamp(profile.landingDepth ?? 0, 0, Math.max(0, shape.halfExtents[1] - 0.5));
+    const visualHalfDepth = shape.halfExtents[1] - landingDepth;
+    const depth = visualHalfDepth * 2;
     const count = THREE.MathUtils.clamp(Math.max(Math.ceil(depth / 0.55), Math.ceil(Math.abs(profile.end - profile.start) * 4)), 10, 30);
     const stepDepth = depth / count;
     const stepGeometry = this.track(new THREE.BoxGeometry(shape.halfExtents[0] * 2, 0.24, stepDepth + 0.08));
@@ -460,15 +502,23 @@ export class CelestialWorld {
   }
 
   private buildBridgeDetails(section: AnyRouteSection, shape: Extract<RouteShape, { kind: 'obb' }>): void {
+    const hubInset = section.id === 'fallen-orbit-bridge' ? 5.25 : 0;
+    const forwardLength = Math.hypot(section.cameraForward[0], section.cameraForward[1]) || 1;
+    const forwardX = section.cameraForward[0] / forwardLength;
+    const forwardZ = section.cameraForward[1] / forwardLength;
     const group = new THREE.Group();
     group.name = `${section.id}.bridgeKit`;
-    group.position.set(shape.center[0], routeSectionElevationAt(section, shape.center), shape.center[1]);
+    group.position.set(
+      shape.center[0] + forwardX * hubInset * 0.5,
+      routeSectionElevationAt(section, shape.center),
+      shape.center[1] + forwardZ * hubInset * 0.5,
+    );
     group.rotation.y = -shape.rotation;
     this.foregroundLayer.add(group);
-    this.registerCullable(group, shape.center[0], group.position.y, shape.center[1]);
+    this.registerCullable(group, group.position.x, group.position.y, group.position.z);
 
     const halfWidth = shape.halfExtents[0];
-    const halfDepth = shape.halfExtents[1];
+    const halfDepth = shape.halfExtents[1] - hubInset * 0.5;
     const railGeometry = this.track(new THREE.BoxGeometry(0.18, 0.28, 1.45));
     const postGeometry = this.track(new THREE.CylinderGeometry(0.1, 0.14, 0.92, 6));
     const railTransforms: THREE.Matrix4[] = [];
@@ -518,19 +568,24 @@ export class CelestialWorld {
     if (!circle) return;
     const elevation = routeSectionElevationAt(section, circle.center);
     const columnGeometry = this.track(new THREE.CylinderGeometry(0.22, 0.34, 1.9, 7));
-    const columns = new THREE.InstancedMesh(columnGeometry, this.materials.get('blackSlate'), 8);
-    columns.name = `${section.id}.weatheredColumns`;
     const matrix = new THREE.Matrix4();
+    const transforms: THREE.Matrix4[] = [];
     for (let index = 0; index < 8; index += 1) {
       const angle = (index / 8) * Math.PI * 2;
       const radius = circle.radius + 0.18;
+      const localX = Math.sin(angle) * radius;
+      const localZ = Math.cos(angle) * radius;
+      if (!this.routeMouthIsClear(section, circle.center, localX, localZ, 1.7)) continue;
       matrix.compose(
-        new THREE.Vector3(circle.center[0] + Math.sin(angle) * radius, elevation + 0.88 - (index % 3) * 0.12, circle.center[1] + Math.cos(angle) * radius),
+        new THREE.Vector3(circle.center[0] + localX, elevation + 0.88 - (index % 3) * 0.12, circle.center[1] + localZ),
         new THREE.Quaternion().setFromEuler(new THREE.Euler(0, angle + index * 0.19, (index % 2 === 0 ? 1 : -1) * 0.035)),
         new THREE.Vector3(1, 0.72 + (index % 3) * 0.13, 1),
       );
-      columns.setMatrixAt(index, matrix);
+      transforms.push(matrix.clone());
     }
+    const columns = new THREE.InstancedMesh(columnGeometry, this.materials.get('blackSlate'), transforms.length);
+    columns.name = `${section.id}.weatheredColumns`;
+    transforms.forEach((transform, index) => columns.setMatrixAt(index, transform));
     columns.instanceMatrix.needsUpdate = true;
     columns.castShadow = true;
     this.midgroundLayer.add(columns);
@@ -566,6 +621,30 @@ export class CelestialWorld {
     return material;
   }
 
+  private routeMouthIsClear(
+    section: AnyRouteSection,
+    origin: readonly [number, number],
+    localX: number,
+    localZ: number,
+    halfWidth: number,
+  ): boolean {
+    for (const connectedId of section.connectsTo) {
+      const connected = FIRMAMENT_ROUTE_ALL_SECTIONS.find((candidate) => candidate.id === connectedId);
+      const target = connected?.walkable[0]?.center;
+      if (!target) continue;
+      const dx = target[0] - origin[0];
+      const dz = target[1] - origin[1];
+      const length = Math.hypot(dx, dz);
+      if (length <= 0.001) continue;
+      const forwardX = dx / length;
+      const forwardZ = dz / length;
+      const projection = localX * forwardX + localZ * forwardZ;
+      const perpendicular = Math.abs(localX * forwardZ - localZ * forwardX);
+      if (projection > 0 && perpendicular < halfWidth) return false;
+    }
+    return true;
+  }
+
   private buildBiomeEnvironment(section: AnyRouteSection): void {
     const circle = section.walkable.find((shape): shape is Extract<RouteShape, { kind: 'circle' }> => shape.kind === 'circle');
     if (!circle) return;
@@ -594,8 +673,11 @@ export class CelestialWorld {
       const radialZ = Math.cos(angle);
       if (radialX * cameraX + radialZ * cameraZ > 0.16) continue;
       const radius = circle.radius + 0.65 + (index % 3 === 0 ? 0.35 : 0);
+      const localX = radialX * radius;
+      const localZ = radialZ * radius;
+      if (!this.routeMouthIsClear(section, circle.center, localX, localZ, 2.05)) continue;
       matrix.compose(
-        new THREE.Vector3(radialX * radius, columnHeight * 0.48, radialZ * radius),
+        new THREE.Vector3(localX, columnHeight * 0.48, localZ),
         new THREE.Quaternion().setFromEuler(new THREE.Euler(0, angle, (index % 2 ? -1 : 1) * 0.04)),
         new THREE.Vector3(1, 0.82 + (index % 4) * 0.06, 1),
       );
@@ -610,18 +692,23 @@ export class CelestialWorld {
     group.add(columns);
 
     const buttressGeometry = this.track(new THREE.BoxGeometry(0.34, 2.3, 1.15));
-    const buttresses = new THREE.InstancedMesh(buttressGeometry, floorMaterial, 12);
-    buttresses.name = `${section.id}.flyingButtresses`;
+    const buttressTransforms: THREE.Matrix4[] = [];
     for (let index = 0; index < 12; index += 1) {
       const angle = index / 12 * Math.PI * 2;
       const radius = circle.radius + 1.9;
+      const localX = Math.sin(angle) * radius;
+      const localZ = Math.cos(angle) * radius;
+      if (!this.routeMouthIsClear(section, circle.center, localX, localZ, 2.35)) continue;
       matrix.compose(
-        new THREE.Vector3(Math.sin(angle) * radius, 1.15, Math.cos(angle) * radius),
+        new THREE.Vector3(localX, 1.15, localZ),
         new THREE.Quaternion().setFromEuler(new THREE.Euler(0, angle, Math.sin(angle) * 0.18)),
         new THREE.Vector3(1, 1 + (index % 3) * 0.18, 1),
       );
-      buttresses.setMatrixAt(index, matrix);
+      buttressTransforms.push(matrix.clone());
     }
+    const buttresses = new THREE.InstancedMesh(buttressGeometry, floorMaterial, buttressTransforms.length);
+    buttresses.name = `${section.id}.flyingButtresses`;
+    buttressTransforms.forEach((transform, index) => buttresses.setMatrixAt(index, transform));
     buttresses.instanceMatrix.needsUpdate = true;
     buttresses.castShadow = true;
     group.add(buttresses);
@@ -675,8 +762,11 @@ export class CelestialWorld {
       if (radialX * cameraX + radialZ * cameraZ > 0.3) continue;
       const radius = circle.radius + 3 + (index % 5) * 0.72;
       const height = 0.85 + (index % 4) * 0.26;
+      const localX = radialX * radius;
+      const localZ = radialZ * radius;
+      if (!this.routeMouthIsClear(section, circle.center, localX, localZ, 2.65)) continue;
       matrix.compose(
-        new THREE.Vector3(radialX * radius, height * 0.65 - 0.2, radialZ * radius),
+        new THREE.Vector3(localX, height * 0.65 - 0.2, localZ),
         new THREE.Quaternion().setFromEuler(new THREE.Euler(0, angle * 1.7, (index % 3 - 1) * 0.1)),
         new THREE.Vector3(0.7 + (index % 3) * 0.25, height, 0.7 + ((index + 1) % 3) * 0.2),
       );
@@ -875,7 +965,8 @@ export class CelestialWorld {
 
     const portcullis = new THREE.Group();
     portcullis.name = 'gatePortcullis';
-    portcullis.position.y = open ? 5.35 : 0.08;
+    portcullis.position.y = open ? 3.65 : 0.08;
+    portcullis.visible = !open;
     group.add(portcullis);
 
     const innerWidth = Math.max(1, length - 0.7);

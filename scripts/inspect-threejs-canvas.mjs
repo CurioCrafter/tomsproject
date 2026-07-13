@@ -21,7 +21,7 @@ function parseArgs(argv) {
     else if (value === '--wait') args.wait = Number(argv[++i]);
     else if (value === '--state') args.state = argv[++i];
     else if (value === '-h' || value === '--help') {
-      console.log('Usage: inspect-threejs-canvas.mjs [--url URL] [--out DIR] [--mobile] [--wait MS] [--state active|boundary|bridge|midboss|finalboss|death|victory]');
+      console.log('Usage: inspect-threejs-canvas.mjs [--url URL] [--out DIR] [--mobile] [--wait MS] [--state active|boundary|bridge|drowned-choice|drowned-selected|midboss|finalboss|death|victory]');
       process.exit(0);
     } else {
       throw new Error(`Unknown argument: ${value}`);
@@ -122,6 +122,21 @@ async function main() {
     await page.keyboard.up('KeyA');
   } else if (args.state === 'bridge') {
     await page.evaluate(() => window.__CELESTIAL_GAME_TEST__?.showSection('fallen-orbit-bridge'));
+  } else if (args.state === 'drowned-choice' || args.state === 'drowned-selected') {
+    await page.evaluate(() => {
+      window.__CELESTIAL_GAME_TEST__?.showEncounter('ashen-processional-ward');
+      window.__CELESTIAL_GAME_TEST__?.defeatActiveEncounter();
+      window.__CELESTIAL_GAME_TEST__?.claimReward(0);
+    });
+    const atlasClose = page.locator('#atlas-close');
+    if (await atlasClose.isVisible().catch(() => false)) await atlasClose.click();
+    await page.waitForFunction(() => window.__THREE_GAME_DIAGNOSTICS__?.phase === 'exploration');
+    await page.evaluate((state) => {
+      window.__CELESTIAL_GAME_TEST__?.showChoice('drowned-vow');
+      if (state === 'drowned-selected') {
+        window.__CELESTIAL_GAME_TEST__?.chooseBranch('drowned-vow', 'still-the-bells');
+      }
+    }, args.state);
   } else if (args.state === 'midboss') {
     await page.evaluate(() => window.__CELESTIAL_GAME_TEST__?.showEncounter('orrery-castellan'));
   } else if (args.state === 'boss' || args.state === 'finalboss' || args.state === 'victory') {

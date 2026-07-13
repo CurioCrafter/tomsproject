@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { FIRMAMENT_ROUTE, FIRMAMENT_ROUTE_WALKABLE } from '../src/game/content/FirmamentRoute';
 import {
   getAllRouteSections,
+  resolveRouteSurface,
   routeElevationAtClosest,
   routeSectionElevationAt,
 } from '../src/game/content/RouteGeometry';
@@ -171,9 +172,134 @@ test('gates, interactions, and encounter spawns keep authored clearance', () => 
 test('stacked route elevation stays on the current authored surface', () => {
   const section = getAllRouteSections(FIRMAMENT_ROUTE).find((candidate) => candidate.id === 'graveglass-crypt');
   expect(section).toBeDefined();
-  const point = [4, 14.2] as const;
+  const point = [13, 17.2] as const;
   const ownerElevation = routeSectionElevationAt(section!, point);
   expect(routeElevationAtClosest(FIRMAMENT_ROUTE, point, ownerElevation)).toBeCloseTo(ownerElevation, 5);
+});
+
+test('a selected branch stair owns height continuously from its hub landing to its arena', () => {
+  const sections = getAllRouteSections(FIRMAMENT_ROUTE);
+  const moonCourt = sections.find((section) => section.id === 'moon-court');
+  const ascent = sections.find((section) => section.id === 'drowned-belfry-ascent');
+  const belfry = sections.find((section) => section.id === 'drowned-pale-belfry');
+  expect(moonCourt).toBeDefined();
+  expect(ascent?.kind).toBe('stair');
+  expect(belfry).toBeDefined();
+  const shape = ascent?.walkable[0];
+  if (!moonCourt || !ascent || !belfry || !shape || shape.kind !== 'obb') throw new Error('Missing Drowned branch geometry.');
+
+  const eligible = [moonCourt, ascent, belfry];
+  const forwardLength = Math.hypot(ascent.cameraForward[0], ascent.cameraForward[1]) || 1;
+  const forward: readonly [number, number] = [
+    ascent.cameraForward[0] / forwardLength,
+    ascent.cameraForward[1] / forwardLength,
+  ];
+  let sectionId: string | null = moonCourt.id;
+  let elevation = 0;
+  let maximumStep = 0;
+  for (let sample = 0; sample <= 80; sample += 1) {
+    const distance = THREE.MathUtils.lerp(-shape.halfExtents[1] + 0.1, shape.halfExtents[1] - 0.1, sample / 80);
+    const surface = resolveRouteSurface(
+      eligible,
+      [shape.center[0] + forward[0] * distance, shape.center[1] + forward[1] * distance],
+      elevation,
+      sectionId,
+    );
+    expect(surface, `Drowned stair sample ${sample} should own a surface`).not.toBeNull();
+    if (!surface) continue;
+    maximumStep = Math.max(maximumStep, Math.abs(surface.elevation - elevation));
+    elevation = surface.elevation;
+    sectionId = surface.section.id;
+  }
+
+  expect(sectionId).toBe(belfry.id);
+  expect(elevation).toBeCloseTo(3.2, 5);
+  expect(maximumStep).toBeLessThan(0.12);
+  const arenaSurface = resolveRouteSurface(eligible, belfry.walkable[0].center, elevation, sectionId);
+  expect(arenaSurface?.section.id).toBe(belfry.id);
+  expect(arenaSurface?.elevation).toBeCloseTo(3.2, 5);
+});
+
+test('every branch stair transfers continuously from its declared start section to its destination', () => {
+  const sectionById = new Map(getAllRouteSections(FIRMAMENT_ROUTE).map((section) => [section.id, section]));
+  const stairs = (FIRMAMENT_ROUTE.branchSections ?? []).filter((section) => section.kind === 'stair');
+
+  for (const stair of stairs) {
+    const start = sectionById.get(stair.connectsTo[0]);
+    const destination = sectionById.get(stair.connectsTo[1]);
+    const shape = stair.walkable[0];
+    expect(start, `${stair.id} should have an authored start section`).toBeDefined();
+    expect(destination, `${stair.id} should have an authored destination section`).toBeDefined();
+    if (!start || !destination || shape.kind !== 'obb' || !stair.elevation) continue;
+
+    const eligible = [start, stair, destination];
+    const forwardLength = Math.hypot(stair.cameraForward[0], stair.cameraForward[1]) || 1;
+    const forward: readonly [number, number] = [
+      stair.cameraForward[0] / forwardLength,
+      stair.cameraForward[1] / forwardLength,
+    ];
+    let currentSectionId: string | null = start.id;
+    let elevation = stair.elevation.start;
+    let maximumStep = 0;
+    for (let sample = 0; sample <= 100; sample += 1) {
+      const distance = THREE.MathUtils.lerp(-shape.halfExtents[1] + 0.1, shape.halfExtents[1] - 0.1, sample / 100);
+      const surface = resolveRouteSurface(
+        eligible,
+        [shape.center[0] + forward[0] * distance, shape.center[1] + forward[1] * distance],
+        elevation,
+        currentSectionId,
+      );
+      expect(surface, `${stair.id} sample ${sample} should own a surface`).not.toBeNull();
+      if (!surface) continue;
+      maximumStep = Math.max(maximumStep, Math.abs(surface.elevation - elevation));
+      elevation = surface.elevation;
+      currentSectionId = surface.section.id;
+    }
+    expect(maximumStep, `${stair.id} should not snap vertically`).toBeLessThan(0.15);
+    expect(elevation, `${stair.id} should reach its authored destination height`).toBeCloseTo(stair.elevation.end, 5);
+    const destinationSurface = resolveRouteSurface(
+      eligible,
+      destination.walkable[0].center,
+      elevation,
+      currentSectionId,
+    );
+    expect(destinationSurface?.section.id, `${stair.id} should hand ownership to ${destination.id}`).toBe(destination.id);
+  }
+});
+
+test('closed gates only block characters on the gate owner elevation', () => {
+  const gate = FIRMAMENT_ROUTE.gates.find((candidate) => candidate.id === 'drowned-direct-seal');
+  expect(gate).toBeDefined();
+  if (!gate) return;
+  const midpoint = new THREE.Vector3(
+    (gate.collider.a[0] + gate.collider.b[0]) * 0.5,
+    0,
+    (gate.collider.a[1] + gate.collider.b[1]) * 0.5,
+  );
+  const tangent = new THREE.Vector3(
+    gate.collider.b[0] - gate.collider.a[0],
+    0,
+    gate.collider.b[1] - gate.collider.a[1],
+  ).normalize();
+  const normal = new THREE.Vector3(-tangent.z, 0, tangent.x);
+  const collision = new CollisionSystem();
+  collision.configureRouteCollision(
+    FIRMAMENT_ROUTE_WALKABLE,
+    [gate],
+    [{ id: gate.id, state: 'closed' }],
+    new Map([[gate.id, 0]]),
+  );
+
+  expect(collision.sweepClosedGates(
+    midpoint.clone().addScaledVector(normal, 1.5),
+    midpoint.clone().addScaledVector(normal, -1.5),
+    ROUTE_GATE_PARTITION_PLAYER_RADIUS,
+  )?.gateId).toBe(gate.id);
+  expect(collision.sweepClosedGates(
+    midpoint.clone().setY(3.2).addScaledVector(normal, 1.5),
+    midpoint.clone().setY(3.2).addScaledVector(normal, -1.5),
+    ROUTE_GATE_PARTITION_PLAYER_RADIUS,
+  )).toBeNull();
 });
 
 test('the runtime player collider can traverse every ordered section when seals are open', () => {
@@ -200,6 +326,77 @@ test('the runtime player collider can traverse every ordered section when seals 
     }
     expect(position.distanceTo(target), `runtime traversal should reach ${section.id}`).toBeLessThanOrEqual(0.12);
   }
+});
+
+test('the runtime player collider can traverse every complete branch arm when its seals are open', () => {
+  const sectionById = new Map(getAllRouteSections(FIRMAMENT_ROUTE).map((section) => [section.id, section]));
+  const mainSectionIds = new Set<string>(FIRMAMENT_ROUTE.sections.map((section) => section.id));
+  const failures: string[] = [];
+
+  for (const choice of FIRMAMENT_ROUTE.choices ?? []) {
+    for (const option of choice.options) {
+      const optionSections = option.sectionIds.map((sectionId) => sectionById.get(sectionId));
+      expect(optionSections, `${choice.id}/${option.id} should only reference authored sections`).not.toContain(undefined);
+      const downstreamId = optionSections
+        .flatMap((section) => section?.connectsTo ?? [])
+        .find((sectionId) => mainSectionIds.has(sectionId) && sectionId !== choice.sectionId);
+      const downstream = downstreamId ? sectionById.get(downstreamId) : undefined;
+      const choiceSection = sectionById.get(choice.sectionId);
+      expect(choiceSection, `${choice.id} should own an authored section`).toBeDefined();
+      expect(downstream, `${choice.id}/${option.id} should reconnect downstream`).toBeDefined();
+
+      const routeSections = [choiceSection, ...optionSections, downstream].filter(
+        (section): section is NonNullable<typeof section> => Boolean(section),
+      );
+      const regions = routeSections.flatMap((section) => section.walkable);
+      const collision = new CollisionSystem();
+      collision.configureRouteCollision(
+        regions,
+        FIRMAMENT_ROUTE.gates,
+        FIRMAMENT_ROUTE.gates.map((gate) => ({ id: gate.id, state: 'open' as const })),
+      );
+      const position = new THREE.Vector3(choice.position[0], 0.02, choice.position[1]);
+      const velocity = new THREE.Vector3();
+
+      const visit = (target: THREE.Vector3, label: string): void => {
+        for (let step = 0; step < 1_000 && position.distanceToSquared(target) > 0.08 ** 2; step += 1) {
+          const previous = position.clone();
+          const movement = target.clone().sub(position).setY(0);
+          const distance = movement.length();
+          if (distance > 0.08) movement.multiplyScalar(0.08 / distance);
+          position.add(movement);
+          velocity.copy(movement).multiplyScalar(60);
+          collision.resolveRouteMovement(previous, position, velocity, ROUTE_GATE_PARTITION_PLAYER_RADIUS, regions);
+        }
+        const remainingDistance = position.distanceTo(target);
+        if (remainingDistance > 0.12) {
+          failures.push(
+            `${choice.id}/${option.id} could not reach ${label}; stopped at `
+            + `[${position.x.toFixed(3)}, ${position.z.toFixed(3)}], ${remainingDistance.toFixed(3)} units short`,
+          );
+          position.copy(target);
+        }
+      };
+
+      for (const section of [...optionSections, downstream]) {
+        if (!section) continue;
+        const shape = section.walkable[0];
+        const target = new THREE.Vector3(shape.center[0], 0.02, shape.center[1]);
+        visit(target, section.id);
+        if (section.kind === 'stair' && shape.kind === 'obb') {
+          const forwardLength = Math.hypot(section.cameraForward[0], section.cameraForward[1]) || 1;
+          const distance = Math.max(0, shape.halfExtents[1] - ROUTE_GATE_PARTITION_PLAYER_RADIUS - 0.05);
+          visit(new THREE.Vector3(
+            shape.center[0] + section.cameraForward[0] / forwardLength * distance,
+            0.02,
+            shape.center[1] + section.cameraForward[1] / forwardLength * distance,
+          ), `${section.id} exit`);
+        }
+      }
+    }
+  }
+
+  expect(failures).toEqual([]);
 });
 
 test('every authored stair samples a monotonic playable elevation from entry to exit', () => {

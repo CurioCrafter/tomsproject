@@ -37,10 +37,11 @@ import {
   FIRMAMENT_ROUTE_ALL_ENCOUNTERS,
   FIRMAMENT_ROUTE_ALL_SECTIONS,
   FIRMAMENT_ROUTE_ALL_WALKABLE,
+  FIRMAMENT_ROUTE_WALKABLE,
 } from './content/FirmamentRoute';
 import {
+  resolveRouteSurface,
   routeElevationAt,
-  routeElevationAtClosest,
   routeSectionElevationAt,
   type AnyRouteSection,
 } from './content/RouteGeometry';
@@ -66,6 +67,15 @@ const FINAL_BOSS_SPAWN = FIRMAMENT_ROUTE.encounters
   ?.spawns.find((spawn) => spawn.kind === 'eclipseArchon');
 if (!FINAL_BOSS_SPAWN) throw new Error('The firmament route requires a final Eclipse Archon spawn.');
 const BOSS_POSITION = new THREE.Vector3(FINAL_BOSS_SPAWN.position[0], 0, FINAL_BOSS_SPAWN.position[1]);
+const ROUTE_SECTION_BY_ID = new Map(FIRMAMENT_ROUTE_ALL_SECTIONS.map((section) => [section.id, section]));
+const ROUTE_GATE_ELEVATIONS = new Map(FIRMAMENT_ROUTE.gates.map((gate) => {
+  const midpoint: readonly [number, number] = [
+    (gate.collider.a[0] + gate.collider.b[0]) * 0.5,
+    (gate.collider.a[1] + gate.collider.b[1]) * 0.5,
+  ];
+  const section = ROUTE_SECTION_BY_ID.get(gate.sectionId);
+  return [gate.id, section ? routeSectionElevationAt(section, midpoint) : 0] as const;
+}));
 
 type GamePhase = 'menu' | 'exploration' | 'boss' | 'dead' | 'victory' | 'paused';
 type DamageSource = 'melee' | 'lunar' | 'aurora';
@@ -151,6 +161,7 @@ export class Game {
   private readonly relicCheckpointIds = new Map<CelestialRelic, string>();
   private readonly enemies: Enemy[] = [];
   private readonly projectiles: CombatProjectile[] = [];
+  private readonly projectileSurfaceSectionIds = new Map<CombatProjectile, string>();
   private readonly enemyAttacks: EnemyAttackEvent[] = [];
   private readonly enemySpawnIds = new Map<Enemy, string>();
   private readonly enemyBySpawnId = new Map<string, Enemy>();
@@ -158,6 +169,9 @@ export class Game {
   private readonly enemyLeashRegions = new Map<Enemy, readonly RouteShape[]>();
   private readonly enemySurfaceSections = new Map<Enemy, AnyRouteSection>();
   private readonly enemyWakeAt = new Map<Enemy, number>();
+  private activeRouteSections: readonly AnyRouteSection[] = FIRMAMENT_ROUTE.sections;
+  private activeRouteWalkable: readonly RouteShape[] = FIRMAMENT_ROUTE_WALKABLE;
+  private currentSurfaceSectionId: string | null = FIRMAMENT_ROUTE.start.sectionId;
   private readonly checkpoint = START_POSITION.clone();
   private readonly previousPlayerPosition = START_POSITION.clone();
   private readonly aim2 = new THREE.Vector2();
@@ -297,7 +311,12 @@ export class Game {
     this.createScene();
     this.createRelics();
     this.boss = this.createEnemies();
-    this.collision.configureRouteCollision(FIRMAMENT_ROUTE_ALL_WALKABLE, FIRMAMENT_ROUTE.gates, this.combinedGateStates());
+    this.collision.configureRouteCollision(
+      FIRMAMENT_ROUTE_WALKABLE,
+      FIRMAMENT_ROUTE.gates,
+      this.combinedGateStates(),
+      ROUTE_GATE_ELEVATIONS,
+    );
     this.syncRouteState();
     this.player.restoreAt(START_POSITION);
     this.hud.setTarget(PROGRESSION_TARGET);
@@ -327,6 +346,7 @@ export class Game {
     this.hud.dispose();
     this.debugTools.dispose();
     for (const projectile of this.projectiles) projectile.dispose();
+    this.projectileSurfaceSectionIds.clear();
     for (const relic of this.relics) relic.dispose();
     for (const enemy of this.enemies) enemy.dispose();
     this.player.dispose();
@@ -479,7 +499,10 @@ export class Game {
       if (delay > 0) this.enemyWakeAt.set(enemy, this.elapsed + delay);
       else enemy.awaken();
     }
-    const elevation = routeElevationAt(FIRMAMENT_ROUTE, encounter.activation.center);
+    const encounterSection = ROUTE_SECTION_BY_ID.get(encounter.sectionIds[0]);
+    const elevation = encounterSection
+      ? routeSectionElevationAt(encounterSection, encounter.activation.center)
+      : routeElevationAt(FIRMAMENT_ROUTE, encounter.activation.center);
     this.vfx.emitCelestialRestoration(
       new THREE.Vector3(encounter.activation.center[0], elevation, encounter.activation.center[1]),
       1.45,
@@ -497,8 +520,23 @@ export class Game {
 
   private syncRouteState(): void {
     const gates = this.combinedGateStates();
+    const selections = this.branchDirector.getSnapshot().selections;
+    const selectedOptions = new Set(selections.map((selection) => `${selection.choiceId}:${selection.optionId}`));
+    const activeBranches = (FIRMAMENT_ROUTE.branchSections ?? []).filter((section) => (
+      selectedOptions.has(`${section.choiceId}:${section.optionId}`)
+    ));
+    this.activeRouteSections = [...FIRMAMENT_ROUTE.sections, ...activeBranches];
+    this.activeRouteWalkable = this.activeRouteSections.flatMap((section) => section.walkable);
+    this.collision.setRouteWalkableRegions(this.activeRouteWalkable);
     this.collision.syncGateStates(gates);
     this.world.setGateStates(gates);
+    this.world.setBranchSelections(selections);
+    if (
+      this.currentSurfaceSectionId
+      && !this.activeRouteSections.some((section) => section.id === this.currentSurfaceSectionId)
+    ) {
+      this.currentSurfaceSectionId = null;
+    }
   }
 
   private combinedGateStates(): readonly GateStateSnapshot[] {
@@ -524,9 +562,19 @@ export class Game {
       this.player.group.position,
       this.player.velocity,
       this.player.radius,
+      this.activeRouteWalkable,
     );
     const playerPoint: readonly [number, number] = [this.player.group.position.x, this.player.group.position.z];
-    this.player.setGroundHeight(routeElevationAtClosest(FIRMAMENT_ROUTE, playerPoint, this.player.group.position.y));
+    const surface = resolveRouteSurface(
+      this.activeRouteSections,
+      playerPoint,
+      this.player.group.position.y,
+      this.currentSurfaceSectionId,
+    );
+    if (surface) {
+      this.currentSurfaceSectionId = surface.section.id;
+      this.player.setGroundHeight(surface.elevation);
+    }
     const availableChoice = !this.encounterDirector.activeEncounter && !this.branchDirector.activeEncounter
       ? this.branchDirector.findAvailableChoiceAt(playerPoint, this.player.radius)
       : null;
@@ -669,7 +717,13 @@ export class Game {
     const track = this.recordSpellUse(trackSchool);
     const source: DamageSource = trackSchool;
     const damage = ability.power * this.player.spellMultiplier * this.magicMultiplier(trackSchool) * this.tierMultiplier(track.tier);
-    const surface = routeElevationAt(FIRMAMENT_ROUTE, [this.player.group.position.x, this.player.group.position.z]);
+    const playerSurface = resolveRouteSurface(
+      this.activeRouteSections,
+      [this.player.group.position.x, this.player.group.position.z],
+      this.player.group.position.y,
+      this.currentSurfaceSectionId,
+    );
+    const surface = playerSurface?.elevation ?? this.player.group.position.y - 0.02;
 
     if (ability.form === 'bolt') {
       const origin = this.player.group.position.clone().addScaledVector(this.player.facing, 0.85);
@@ -683,6 +737,7 @@ export class Game {
             : 'star';
       const projectile = new CombatProjectile('player', kind, origin, this.player.facing, ability.school === 'comet' ? 16 : 13.5, damage, 0.23, 3.1);
       projectile.setSurfaceHeight(surface);
+      if (playerSurface) this.projectileSurfaceSectionIds.set(projectile, playerSurface.section.id);
       this.projectiles.push(projectile);
       this.scene.add(projectile.group);
       this.vfx.emitCast(origin, this.player.facing, 0.9 + this.tierRank(track.tier) * 0.08);
@@ -716,13 +771,18 @@ export class Game {
       const origin = this.player.group.position.clone();
       const destination = origin.clone().addScaledVector(this.player.facing, 4.2);
       const velocity = this.player.facing.clone();
-      this.collision.resolveRouteMovement(origin, destination, velocity, this.player.radius);
+      this.collision.resolveRouteMovement(origin, destination, velocity, this.player.radius, this.activeRouteWalkable);
       this.player.group.position.copy(destination);
-      this.player.setGroundHeight(routeElevationAtClosest(
-        FIRMAMENT_ROUTE,
+      const surface = resolveRouteSurface(
+        this.activeRouteSections,
         [destination.x, destination.z],
         this.player.group.position.y,
-      ));
+        this.currentSurfaceSectionId,
+      );
+      if (surface) {
+        this.currentSurfaceSectionId = surface.section.id;
+        this.player.setGroundHeight(surface.elevation);
+      }
       for (const enemy of this.enemies) {
         if (!enemy.active || enemy.dormant) continue;
         if (enemy.group.position.distanceToSquared(origin) <= (3.2 + enemy.radius) ** 2) this.damageEnemy(enemy, damage * 0.8, source);
@@ -806,7 +866,15 @@ export class Game {
         attack.radius,
         4.2,
       );
-      projectile.setSurfaceHeight(routeElevationAt(FIRMAMENT_ROUTE, [origin.x, origin.z]));
+      const sourceSectionId = this.enemySurfaceSections.get(attack.source)?.id ?? null;
+      const sourceSurface = resolveRouteSurface(
+        this.activeRouteSections,
+        [origin.x, origin.z],
+        attack.source.group.position.y,
+        sourceSectionId,
+      );
+      projectile.setSurfaceHeight(sourceSurface?.elevation ?? attack.source.group.position.y);
+      if (sourceSurface) this.projectileSurfaceSectionIds.set(projectile, sourceSurface.section.id);
       this.projectiles.push(projectile);
       this.scene.add(projectile.group);
     }
@@ -816,9 +884,27 @@ export class Game {
   private updateProjectiles(delta: number): void {
     for (let index = this.projectiles.length - 1; index >= 0; index -= 1) {
       const projectile = this.projectiles[index];
-      projectile.setSurfaceHeight(routeElevationAt(FIRMAMENT_ROUTE, [projectile.group.position.x, projectile.group.position.z]));
+      let projectileSurface = resolveRouteSurface(
+        this.activeRouteSections,
+        [projectile.group.position.x, projectile.group.position.z],
+        projectile.group.position.y,
+        this.projectileSurfaceSectionIds.get(projectile) ?? null,
+      );
+      if (projectileSurface) {
+        projectile.setSurfaceHeight(projectileSurface.elevation);
+        this.projectileSurfaceSectionIds.set(projectile, projectileSurface.section.id);
+      }
       projectile.update(delta, this.elapsed);
-      projectile.setSurfaceHeight(routeElevationAt(FIRMAMENT_ROUTE, [projectile.group.position.x, projectile.group.position.z]));
+      projectileSurface = resolveRouteSurface(
+        this.activeRouteSections,
+        [projectile.group.position.x, projectile.group.position.z],
+        projectile.group.position.y,
+        this.projectileSurfaceSectionIds.get(projectile) ?? null,
+      );
+      if (projectileSurface) {
+        projectile.setSurfaceHeight(projectileSurface.elevation);
+        this.projectileSurfaceSectionIds.set(projectile, projectileSurface.section.id);
+      }
       if (
         projectile.active &&
         (this.collision.sweepClosedGates(projectile.previousPosition, projectile.group.position, projectile.radius) ||
@@ -850,6 +936,7 @@ export class Game {
       }
       if (projectile.active) continue;
       this.scene.remove(projectile.group);
+      this.projectileSurfaceSectionIds.delete(projectile);
       projectile.dispose();
       this.projectiles.splice(index, 1);
     }
@@ -1065,6 +1152,7 @@ export class Game {
       this.checkpoint.copy(START_POSITION);
     }
     this.player.restoreAt(this.checkpoint);
+    this.currentSurfaceSectionId = null;
     this.phase = 'exploration';
     this.deathTimer = 0;
     this.accumulator = 0;
@@ -1103,6 +1191,7 @@ export class Game {
     this.player.setFocusRegenMultiplier(1);
     this.applyProgressionBuild(false);
     this.player.restoreAt(START_POSITION);
+    this.currentSurfaceSectionId = FIRMAMENT_ROUTE.start.sectionId;
     this.phase = 'exploration';
     this.input.setEnabled(true);
     this.lockedTarget = null;
@@ -1352,6 +1441,7 @@ export class Game {
       projectile.dispose();
     }
     this.projectiles.length = 0;
+    this.projectileSurfaceSectionIds.clear();
   }
 
   private getCurrentObjective(): string {
@@ -1374,14 +1464,21 @@ export class Game {
 
   private findCurrentSection(): AnyRouteSection | null {
     const position = this.player.group.position;
+    const owned = this.currentSurfaceSectionId
+      ? this.activeRouteSections.find((section) => section.id === this.currentSurfaceSectionId) ?? null
+      : null;
+    if (owned && this.collision.containsInWalkableUnion(position, this.player.radius * 0.25, owned.walkable)) {
+      return owned;
+    }
     let best: AnyRouteSection | null = null;
     let bestScore = Number.POSITIVE_INFINITY;
-    for (const section of FIRMAMENT_ROUTE_ALL_SECTIONS) {
+    for (const section of this.activeRouteSections) {
       if (!this.collision.containsInWalkableUnion(position, this.player.radius * 0.25, section.walkable)) continue;
       const score = Math.min(...section.walkable.map((shape) => {
         const distance = Math.hypot(position.x - shape.center[0], position.z - shape.center[1]);
         const scale = shape.kind === 'circle' ? shape.radius : Math.hypot(shape.halfExtents[0], shape.halfExtents[1]);
-        return distance / Math.max(0.001, scale) + (shape.kind === 'circle' ? -0.08 : 0);
+        const elevation = routeSectionElevationAt(section, [position.x, position.z]);
+        return distance / Math.max(0.001, scale) + Math.abs(elevation - position.y) * 0.25;
       }));
       if (score >= bestScore) continue;
       bestScore = score;
@@ -1617,6 +1714,7 @@ export class Game {
           shape.center[1],
         );
         this.player.restoreAt(position);
+        this.currentSurfaceSectionId = section.id;
         this.player.setFacing(new THREE.Vector3(section.cameraForward[0], 0, section.cameraForward[1]));
         this.cameraRig.snapTo(position);
         this.publishDiagnostics(true);
@@ -1633,6 +1731,7 @@ export class Game {
           choice.position[1],
         );
         this.player.restoreAt(position);
+        this.currentSurfaceSectionId = section.id;
         this.player.setFacing(new THREE.Vector3(section.cameraForward[0], 0, section.cameraForward[1]));
         this.cameraRig.snapTo(position);
         this.nearbyChoiceId = choice.id;
@@ -1661,6 +1760,7 @@ export class Game {
           : routeElevationAt(FIRMAMENT_ROUTE, encounter.activation.center);
         const position = new THREE.Vector3(encounter.activation.center[0], surface + 0.02, encounter.activation.center[1]);
         this.player.restoreAt(position);
+        this.currentSurfaceSectionId = section?.id ?? null;
         const activated = this.branchDirector.activateSelectedEncounterAt(encounter.activation.center, this.player.radius);
         if (activated) this.onBranchEncounterActivated(activated);
         this.cameraRig.snapTo(position);
@@ -1711,6 +1811,7 @@ export class Game {
     const position = new THREE.Vector3(encounter.activation.center[0], 0.02, encounter.activation.center[1])
       .addScaledVector(forward, -distance);
     this.player.restoreAt(position);
+    this.currentSurfaceSectionId = section?.id ?? null;
     this.player.setFacing(forward);
     this.cameraRig.snapTo(position);
   }

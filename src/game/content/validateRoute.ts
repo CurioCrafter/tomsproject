@@ -149,6 +149,22 @@ export function routeShapesOverlap(first: RouteShape, second: RouteShape): boole
   return obbOverlap(first as ObbRouteShape, second as ObbRouteShape);
 }
 
+export function routeShapesOverlapForRadius(first: RouteShape, second: RouteShape, radius: number): boolean {
+  const inset = (shape: RouteShape): RouteShape | null => {
+    const safeRadius = Math.max(0, radius);
+    if (shape.kind === 'circle') {
+      const nextRadius = shape.radius - safeRadius;
+      return nextRadius > 0 ? { ...shape, radius: nextRadius } : null;
+    }
+    const halfX = shape.halfExtents[0] - safeRadius;
+    const halfZ = shape.halfExtents[1] - safeRadius;
+    return halfX > 0 && halfZ > 0 ? { ...shape, halfExtents: [halfX, halfZ] } : null;
+  };
+  const firstInset = inset(first);
+  const secondInset = inset(second);
+  return Boolean(firstInset && secondInset && routeShapesOverlap(firstInset, secondInset));
+}
+
 function pointToSegmentDistanceSquared(
   x: number,
   z: number,
@@ -518,6 +534,14 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
     if (section.elevation && (!finite(section.elevation.start) || !finite(section.elevation.end))) {
       issues.push({ path: `${path}.elevation`, message: 'Elevation endpoints must be finite.' });
     }
+    if (section.elevation?.landingDepth !== undefined) {
+      if (!finite(section.elevation.landingDepth) || section.elevation.landingDepth < 0) {
+        issues.push({ path: `${path}.elevation.landingDepth`, message: 'Elevation landing depth must be a finite non-negative number.' });
+      }
+      if (section.kind !== 'stair') {
+        issues.push({ path: `${path}.elevation.landingDepth`, message: 'Only stair sections may reserve elevation landings.' });
+      }
+    }
     const anchorIds = validateUniqueIds(section.enemyAnchors, `${path}.enemyAnchors`, issues);
     section.enemyAnchors.forEach((anchor, anchorIndex) => {
       if (!pointInSection(section, anchor.position)) {
@@ -538,7 +562,9 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
     if (!current.connectsTo.includes(next.id) || !next.connectsTo.includes(current.id)) {
       issues.push({ path: `sections[${current.order}].connectsTo`, message: `Ordered sections "${current.id}" and "${next.id}" must be linked both ways.` });
     }
-    const overlaps = current.walkable.some((first) => next.walkable.some((second) => routeShapesOverlap(first, second)));
+    const overlaps = current.walkable.some((first) => next.walkable.some((second) => (
+      routeShapesOverlapForRadius(first, second, ROUTE_GATE_PARTITION_PLAYER_RADIUS)
+    )));
     if (!overlaps) {
       issues.push({ path: `sections[${current.order}].walkable`, message: `Ordered sections "${current.id}" and "${next.id}" do not overlap.` });
     }
@@ -554,7 +580,9 @@ export function validateRouteDefinition(route: CampaignRouteDefinition): readonl
           message: `Connected sections "${section.id}" and "${connected.id}" must link both ways.`,
         });
       }
-      const overlaps = section.walkable.some((first) => connected.walkable.some((second) => routeShapesOverlap(first, second)));
+      const overlaps = section.walkable.some((first) => connected.walkable.some((second) => (
+        routeShapesOverlapForRadius(first, second, ROUTE_GATE_PARTITION_PLAYER_RADIUS)
+      )));
       if (!overlaps) {
         issues.push({
           path: `branchSections[${index}].walkable`,

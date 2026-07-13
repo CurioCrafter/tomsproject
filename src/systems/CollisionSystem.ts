@@ -22,10 +22,12 @@ export type GateSweepHit = {
 
 type DynamicGateCollider = {
   readonly collider: ThickSegmentCollider;
+  readonly elevation: number | null;
   closed: boolean;
 };
 
 const EPSILON = 0.000_001;
+const GATE_SURFACE_TOLERANCE = 0.9;
 
 export class CollisionSystem {
   private readonly closest = new THREE.Vector3();
@@ -58,9 +60,10 @@ export class CollisionSystem {
     regions: readonly RouteShape[],
     gates: readonly GateDefinition[],
     states?: readonly GateStateSnapshot[],
+    gateElevations?: ReadonlyMap<string, number>,
   ): void {
     this.setRouteWalkableRegions(regions);
-    this.configureDynamicGates(gates);
+    this.configureDynamicGates(gates, gateElevations);
     if (states) this.syncGateStates(states);
   }
 
@@ -68,11 +71,12 @@ export class CollisionSystem {
     this.routeWalkableRegions = regions;
   }
 
-  configureDynamicGates(gates: readonly GateDefinition[]): void {
+  configureDynamicGates(gates: readonly GateDefinition[], gateElevations?: ReadonlyMap<string, number>): void {
     this.dynamicGates.clear();
     gates.forEach((gate) => {
       this.dynamicGates.set(gate.id, {
         collider: gate.collider,
+        elevation: gateElevations?.get(gate.id) ?? null,
         closed: gate.initialState === 'closed',
       });
     });
@@ -252,6 +256,7 @@ export class CollisionSystem {
     let earliest: GateSweepHit | null = null;
     this.dynamicGates.forEach((gate, gateId) => {
       if (!gate.closed) return;
+      if (!this.gateAppliesAcrossHeight(gate, start.y, end.y)) return;
       const combinedRadius = Math.max(0, movingRadius) + gate.collider.thickness * 0.5;
       const closestT = this.closestMovementParameterToSegment(start, end, gate.collider);
       const closestDistanceSq = this.distanceAtMovementParameterSq(start, end, closestT, gate.collider);
@@ -353,6 +358,7 @@ export class CollisionSystem {
   private resolveDynamicGateOverlaps(position: THREE.Vector3, velocity: THREE.Vector3, radius: number): void {
     this.dynamicGates.forEach((gate) => {
       if (!gate.closed) return;
+      if (!this.gateAppliesAcrossHeight(gate, position.y, position.y)) return;
       this.closestPointOnSegment(position.x, position.z, gate.collider, this.closest);
       let normalX = position.x - this.closest.x;
       let normalZ = position.z - this.closest.z;
@@ -393,6 +399,13 @@ export class CollisionSystem {
       velocity.x -= normalX * into;
       velocity.z -= normalZ * into;
     }
+  }
+
+  private gateAppliesAcrossHeight(gate: DynamicGateCollider, startY: number, endY: number): boolean {
+    if (gate.elevation === null) return true;
+    const minimum = Math.min(startY, endY) - GATE_SURFACE_TOLERANCE;
+    const maximum = Math.max(startY, endY) + GATE_SURFACE_TOLERANCE;
+    return gate.elevation >= minimum && gate.elevation <= maximum;
   }
 
   private closestMovementParameterToSegment(start: THREE.Vector3, end: THREE.Vector3, segment: ThickSegmentCollider): number {

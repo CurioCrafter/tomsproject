@@ -1,5 +1,40 @@
-import type { CampaignRouteDefinition, RouteShape } from './RouteTypes';
+import type { CampaignRouteDefinition, ObbRouteShape, RouteElevationProfile, RouteShape, Vec2Tuple } from './RouteTypes';
 import { assertValidRouteDefinition } from './validateRoute';
+
+const BRANCH_STAIR_LANDING_DEPTH = 1.35;
+
+function branchStairElevation(start: number, end: number): RouteElevationProfile {
+  return { start, end, landingDepth: BRANCH_STAIR_LANDING_DEPTH };
+}
+
+function branchStairHalfExtents(width: number, visibleHalfDepth: number): Vec2Tuple {
+  return [width, visibleHalfDepth + BRANCH_STAIR_LANDING_DEPTH];
+}
+
+type StairEndpoints = readonly [start: Vec2Tuple, end: Vec2Tuple];
+
+function branchStairForward([start, end]: StairEndpoints): Vec2Tuple {
+  const dx = end[0] - start[0];
+  const dz = end[1] - start[1];
+  const length = Math.hypot(dx, dz) || 1;
+  return [dx / length, dz / length];
+}
+
+function branchStairObb(width: number, endpoints: StairEndpoints): ObbRouteShape {
+  const [start, end] = endpoints;
+  const forward = branchStairForward(endpoints);
+  return {
+    kind: 'obb',
+    center: [(start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5],
+    halfExtents: branchStairHalfExtents(width, Math.hypot(end[0] - start[0], end[1] - start[1]) * 0.5),
+    rotation: Math.atan2(-forward[0], forward[1]),
+  };
+}
+
+const DROWNED_BELFRY_ASCENT: StairEndpoints = [[-5.5, 20.3], [-12.4, 18.1]];
+const DROWNED_BELFRY_RETURN: StairEndpoints = [[-13.5, 14.3], [-8.2, 8.7]];
+const GRAVEGLASS_DESCENT: StairEndpoints = [[5.1, 19.25], [9.65, 16.8]];
+const GRAVEGLASS_RETURN: StairEndpoints = [[9.35, 13.9], [-6.5, 9.2]];
 
 /**
  * The first authored pilgrimage through the Last Firmament. Coordinates are
@@ -188,11 +223,11 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Moon-Belfry Ascent',
       kind: 'stair',
       biome: 'drowned-cloister',
-      elevation: { start: 0, end: 3.2 },
+      elevation: branchStairElevation(0, 3.2),
       safe: false,
       connectsTo: ['moon-court', 'drowned-pale-belfry'],
-      walkable: [{ kind: 'obb', center: [-3.0323, 20.4839], halfExtents: [2.1, 3.74], rotation: 2.0344 }],
-      cameraForward: [-0.894, -0.447],
+      walkable: [branchStairObb(2.1, DROWNED_BELFRY_ASCENT)],
+      cameraForward: branchStairForward(DROWNED_BELFRY_ASCENT),
       enemyAnchors: [],
     },
     {
@@ -205,12 +240,12 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       elevation: { start: 3.2, end: 3.2 },
       safe: false,
       connectsTo: ['drowned-belfry-ascent', 'drowned-belfry-return'],
-      walkable: [{ kind: 'circle', center: [-10, 17], radius: 4.4 }],
-      cameraForward: [0.351, -0.936],
+      walkable: [{ kind: 'circle', center: [-16, 17], radius: 4.4 }],
+      cameraForward: branchStairForward(DROWNED_BELFRY_RETURN),
       enemyAnchors: [
-        { id: 'drowned-bell-heart', position: [-10, 16.5] },
-        { id: 'drowned-bell-left', position: [-12, 18] },
-        { id: 'drowned-bell-right', position: [-8, 18] },
+        { id: 'drowned-bell-heart', position: [-16, 16.5] },
+        { id: 'drowned-bell-left', position: [-18, 18] },
+        { id: 'drowned-bell-right', position: [-14, 18] },
       ],
     },
     {
@@ -220,11 +255,11 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Belfry Return Stair',
       kind: 'stair',
       biome: 'drowned-cloister',
-      elevation: { start: 3.2, end: 0 },
+      elevation: branchStairElevation(3.2, 0),
       safe: false,
       connectsTo: ['drowned-pale-belfry', 'fallen-orbit-bridge'],
-      walkable: [{ kind: 'obb', center: [-7.7275, 10.9401], halfExtents: [2.1, 2.42], rotation: -2.7828 }],
-      cameraForward: [0.351, -0.936],
+      walkable: [branchStairObb(2.1, DROWNED_BELFRY_RETURN)],
+      cameraForward: branchStairForward(DROWNED_BELFRY_RETURN),
       enemyAnchors: [],
     },
     {
@@ -234,11 +269,11 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Graveglass Descent',
       kind: 'stair',
       biome: 'drowned-cloister',
-      elevation: { start: 0, end: -2.4 },
+      elevation: branchStairElevation(0, -2.4),
       safe: false,
       connectsTo: ['moon-court', 'graveglass-crypt'],
-      walkable: [{ kind: 'obb', center: [1.1655, 19.0895], halfExtents: [2.1, 3.49], rotation: -2.7611 }],
-      cameraForward: [0.371, -0.929],
+      walkable: [branchStairObb(2.1, GRAVEGLASS_DESCENT)],
+      cameraForward: branchStairForward(GRAVEGLASS_DESCENT),
       enemyAnchors: [],
     },
     {
@@ -251,12 +286,12 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       elevation: { start: -2.4, end: -2.4 },
       safe: false,
       connectsTo: ['graveglass-descent', 'graveglass-return'],
-      walkable: [{ kind: 'circle', center: [4, 12], radius: 4.5 }],
-      cameraForward: [-0.965, -0.263],
+      walkable: [{ kind: 'circle', center: [13, 15], radius: 4.5 }],
+      cameraForward: branchStairForward(GRAVEGLASS_RETURN),
       enemyAnchors: [
-        { id: 'graveglass-center', position: [4, 12] },
-        { id: 'graveglass-left', position: [2.5, 12] },
-        { id: 'graveglass-right', position: [5.5, 12] },
+        { id: 'graveglass-center', position: [13, 15] },
+        { id: 'graveglass-left', position: [11.5, 15] },
+        { id: 'graveglass-right', position: [14.5, 15] },
       ],
     },
     {
@@ -266,11 +301,11 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Graveglass Return',
       kind: 'stair',
       biome: 'drowned-cloister',
-      elevation: { start: -2.4, end: 0 },
+      elevation: branchStairElevation(-2.4, 0),
       safe: false,
       connectsTo: ['graveglass-crypt', 'fallen-orbit-bridge'],
-      walkable: [{ kind: 'obb', center: [-3.6708, 9.9084], halfExtents: [2.1, 3.8], rotation: 1.837 }],
-      cameraForward: [-0.965, -0.263],
+      walkable: [branchStairObb(2.1, GRAVEGLASS_RETURN)],
+      cameraForward: branchStairForward(GRAVEGLASS_RETURN),
       enemyAnchors: [],
     },
     {
@@ -280,10 +315,10 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Canopy Glass Ascent',
       kind: 'stair',
       biome: 'verdant-cathedral',
-      elevation: { start: 0, end: 2.2 },
+      elevation: branchStairElevation(0, 2.2),
       safe: false,
       connectsTo: ['aurora-refuge', 'verdant-glasshouse'],
-      walkable: [{ kind: 'obb', center: [3.6971, -29.8029], halfExtents: [2.1, 4.05], rotation: 2.1815 }],
+      walkable: [{ kind: 'obb', center: [3.6971, -29.8029], halfExtents: branchStairHalfExtents(2.1, 4.05), rotation: 2.1815 }],
       cameraForward: [-0.707, -0.707],
       enemyAnchors: [],
     },
@@ -312,10 +347,10 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Canopy Return Stair',
       kind: 'stair',
       biome: 'verdant-cathedral',
-      elevation: { start: 2.2, end: 0 },
+      elevation: branchStairElevation(2.2, 0),
       safe: false,
       connectsTo: ['verdant-glasshouse', 'sundered-causeway'],
-      walkable: [{ kind: 'obb', center: [3.9665, -39.8758], halfExtents: [2.1, 4.05], rotation: -2.1815 }],
+      walkable: [{ kind: 'obb', center: [3.9665, -39.8758], halfExtents: branchStairHalfExtents(2.1, 4.05), rotation: -2.1815 }],
       cameraForward: [0.819, -0.573],
       enemyAnchors: [],
     },
@@ -326,10 +361,10 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Bloodroot Descent',
       kind: 'stair',
       biome: 'verdant-cathedral',
-      elevation: { start: 0, end: -1.8 },
+      elevation: branchStairElevation(0, -1.8),
       safe: false,
       connectsTo: ['aurora-refuge', 'bloodroot-basin'],
-      walkable: [{ kind: 'obb', center: [10.3029, -29.8029], halfExtents: [2.1, 4.05], rotation: -2.1815 }],
+      walkable: [{ kind: 'obb', center: [10.3029, -29.8029], halfExtents: branchStairHalfExtents(2.1, 4.05), rotation: -2.1815 }],
       cameraForward: [0.707, -0.707],
       enemyAnchors: [],
     },
@@ -358,10 +393,10 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Bloodroot Return',
       kind: 'stair',
       biome: 'verdant-cathedral',
-      elevation: { start: -1.8, end: 0 },
+      elevation: branchStairElevation(-1.8, 0),
       safe: false,
       connectsTo: ['bloodroot-basin', 'sundered-causeway'],
-      walkable: [{ kind: 'obb', center: [10.0335, -39.8758], halfExtents: [2.1, 4.05], rotation: 2.1815 }],
+      walkable: [{ kind: 'obb', center: [10.0335, -39.8758], halfExtents: branchStairHalfExtents(2.1, 4.05), rotation: 2.1815 }],
       cameraForward: [-0.819, -0.573],
       enemyAnchors: [],
     },
@@ -372,10 +407,10 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Solar Choir Ascent',
       kind: 'stair',
       biome: 'ember-basilica',
-      elevation: { start: 0, end: 4 },
+      elevation: branchStairElevation(0, 4),
       safe: false,
       connectsTo: ['conjunction-cloister', 'ember-cathedral-nave'],
-      walkable: [{ kind: 'obb', center: [2.4268, -47.8995], halfExtents: [1.65, 4.92], rotation: 1.7127 }],
+      walkable: [{ kind: 'obb', center: [2.4268, -47.8995], halfExtents: branchStairHalfExtents(1.65, 4.92), rotation: 1.7127 }],
       cameraForward: [-0.97, -0.24],
       enemyAnchors: [],
     },
@@ -404,10 +439,10 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Bell Loft Return',
       kind: 'stair',
       biome: 'ember-basilica',
-      elevation: { start: 4, end: 0 },
+      elevation: branchStairElevation(4, 0),
       safe: false,
       connectsTo: ['ember-cathedral-nave', 'eclipse-causeway'],
-      walkable: [{ kind: 'obb', center: [-0.25, -53.25], halfExtents: [1.65, 4.1], rotation: -2.064 }],
+      walkable: [{ kind: 'obb', center: [-0.25, -53.25], halfExtents: branchStairHalfExtents(1.65, 4.1), rotation: -2.064 }],
       cameraForward: [0.88, -0.474],
       enemyAnchors: [],
     },
@@ -418,10 +453,10 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Sun-Furnace Descent',
       kind: 'stair',
       biome: 'ember-basilica',
-      elevation: { start: 0, end: -3 },
+      elevation: branchStairElevation(0, -3),
       safe: false,
       connectsTo: ['conjunction-cloister', 'ember-sunheart-crypt'],
-      walkable: [{ kind: 'obb', center: [10.6308, -47.952], halfExtents: [1.7, 3.98], rotation: -1.7762 }],
+      walkable: [{ kind: 'obb', center: [10.6308, -47.952], halfExtents: branchStairHalfExtents(1.7, 3.98), rotation: -1.7762 }],
       cameraForward: [0.95, -0.32],
       enemyAnchors: [],
     },
@@ -450,10 +485,10 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Furnace Return Stair',
       kind: 'stair',
       biome: 'ember-basilica',
-      elevation: { start: -3, end: 0 },
+      elevation: branchStairElevation(-3, 0),
       safe: false,
       connectsTo: ['ember-sunheart-crypt', 'eclipse-causeway'],
-      walkable: [{ kind: 'obb', center: [9.7639, -54.618], halfExtents: [1.7, 5.33], rotation: 2.0344 }],
+      walkable: [{ kind: 'obb', center: [9.7639, -54.618], halfExtents: branchStairHalfExtents(1.7, 5.33), rotation: 2.0344 }],
       cameraForward: [-0.8944, -0.4472],
       enemyAnchors: [],
     },
@@ -464,10 +499,10 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Null Choir Descent',
       kind: 'stair',
       biome: 'amethyst-archives',
-      elevation: { start: 0, end: -4.2 },
+      elevation: branchStairElevation(0, -4.2),
       safe: false,
       connectsTo: ['eclipse-causeway', 'amethyst-null-choir'],
-      walkable: [{ kind: 'obb', center: [-1.518, -57.7255], halfExtents: [1.65, 6.13], rotation: 1.8737 }],
+      walkable: [{ kind: 'obb', center: [-1.518, -57.7255], halfExtents: branchStairHalfExtents(1.65, 6.13), rotation: 1.8737 }],
       cameraForward: [-0.955, -0.298],
       enemyAnchors: [],
     },
@@ -496,10 +531,10 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Null Choir Return',
       kind: 'stair',
       biome: 'amethyst-archives',
-      elevation: { start: -4.2, end: 0 },
+      elevation: branchStairElevation(-4.2, 0),
       safe: false,
       connectsTo: ['amethyst-null-choir', 'moonfall-observatory'],
-      walkable: [{ kind: 'obb', center: [-2.9667, -63.0852], halfExtents: [1.65, 4.42], rotation: -1.7976 }],
+      walkable: [{ kind: 'obb', center: [-2.9667, -63.0852], halfExtents: branchStairHalfExtents(1.65, 4.42), rotation: -1.7976 }],
       cameraForward: [0.974, -0.225],
       enemyAnchors: [],
     },
@@ -510,10 +545,10 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Levitating Archive Ascent',
       kind: 'stair',
       biome: 'amethyst-archives',
-      elevation: { start: 0, end: 5 },
+      elevation: branchStairElevation(0, 5),
       safe: false,
       connectsTo: ['eclipse-causeway', 'levitating-amethyst-archive'],
-      walkable: [{ kind: 'obb', center: [7.6004, -57.4991], halfExtents: [1.65, 4.25], rotation: -1.9656 }],
+      walkable: [{ kind: 'obb', center: [7.6004, -57.4991], halfExtents: branchStairHalfExtents(1.65, 4.25), rotation: -1.9656 }],
       cameraForward: [0.923, -0.385],
       enemyAnchors: [],
     },
@@ -542,10 +577,10 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       name: 'Archive Return Stair',
       kind: 'stair',
       biome: 'amethyst-archives',
-      elevation: { start: 5, end: 0 },
+      elevation: branchStairElevation(5, 0),
       safe: false,
       connectsTo: ['levitating-amethyst-archive', 'moonfall-observatory'],
-      walkable: [{ kind: 'obb', center: [5.9504, -63.0094], halfExtents: [1.65, 5.4], rotation: 1.7682 }],
+      walkable: [{ kind: 'obb', center: [5.9504, -63.0094], halfExtents: branchStairHalfExtents(1.65, 5.4), rotation: 1.7682 }],
       cameraForward: [-0.981, -0.196],
       enemyAnchors: [],
     },
@@ -597,28 +632,28 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       id: 'drowned-belfry-entry',
       name: 'Pale Belfry Vow',
       sectionId: 'drowned-belfry-ascent',
-      collider: { a: [-2.357, 17.839], b: [-4.503, 22.131], thickness: 0.48 },
+      collider: { a: [-6.7, 22.3], b: [-5.3, 17.9], thickness: 0.48 },
       initialState: 'open',
     },
     {
       id: 'graveglass-entry',
       name: 'Graveglass Vow',
       sectionId: 'graveglass-descent',
-      collider: { a: [-0.436, 17.624], b: [4.024, 19.404], thickness: 0.48 },
+      collider: { a: [4.45, 17], b: [6.65, 21], thickness: 0.48 },
       initialState: 'open',
     },
     {
       id: 'drowned-belfry-exit',
       name: 'Pale Belfry Absolution',
       sectionId: 'drowned-belfry-return',
-      collider: { a: [-10.466, 12.263], b: [-6.534, 13.737], thickness: 0.48 },
+      collider: { a: [-14.8, 12.4], b: [-11.45, 15.55], thickness: 0.48 },
       initialState: 'closed',
     },
     {
       id: 'graveglass-exit',
       name: 'Graveglass Absolution',
       sectionId: 'graveglass-return',
-      collider: { a: [-2.052, 12.527], b: [-0.948, 8.473], thickness: 0.48 },
+      collider: { a: [8.2, 16], b: [9.55, 11.55], thickness: 0.48 },
       initialState: 'closed',
     },
     {
@@ -943,12 +978,12 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       optionId: 'still-the-bells',
       name: 'Cantors of the Pale Belfry',
       sectionIds: ['drowned-pale-belfry'],
-      activation: { kind: 'circle', center: [-10, 17], radius: 3.4 },
+      activation: { kind: 'circle', center: [-16, 17], radius: 3.4 },
       objective: 'Silence the drowned cantors before the bell remembers your name',
       spawns: [
-        { id: 'drowned-belfry-cantor', kind: 'drownedCantor', implementation: 'existing', role: 'support', sectionId: 'drowned-pale-belfry', position: [-10, 16.5], facingRadians: 0, leashSectionIds: ['drowned-pale-belfry'], anchorId: 'drowned-bell-heart' },
-        { id: 'drowned-belfry-wisp-left', kind: 'wisp', implementation: 'existing', role: 'artillery', sectionId: 'drowned-pale-belfry', position: [-12, 18], facingRadians: 0, leashSectionIds: ['drowned-pale-belfry'], anchorId: 'drowned-bell-left', wakeDelaySeconds: 0.45 },
-        { id: 'drowned-belfry-wisp-right', kind: 'wisp', implementation: 'existing', role: 'artillery', sectionId: 'drowned-pale-belfry', position: [-8, 18], facingRadians: 0, leashSectionIds: ['drowned-pale-belfry'], anchorId: 'drowned-bell-right', wakeDelaySeconds: 0.8 },
+        { id: 'drowned-belfry-cantor', kind: 'drownedCantor', implementation: 'existing', role: 'support', sectionId: 'drowned-pale-belfry', position: [-16, 16.5], facingRadians: 0, leashSectionIds: ['drowned-pale-belfry'], anchorId: 'drowned-bell-heart' },
+        { id: 'drowned-belfry-wisp-left', kind: 'wisp', implementation: 'existing', role: 'artillery', sectionId: 'drowned-pale-belfry', position: [-18, 18], facingRadians: 0, leashSectionIds: ['drowned-pale-belfry'], anchorId: 'drowned-bell-left', wakeDelaySeconds: 0.45 },
+        { id: 'drowned-belfry-wisp-right', kind: 'wisp', implementation: 'existing', role: 'artillery', sectionId: 'drowned-pale-belfry', position: [-14, 18], facingRadians: 0, leashSectionIds: ['drowned-pale-belfry'], anchorId: 'drowned-bell-right', wakeDelaySeconds: 0.8 },
       ],
     },
     {
@@ -957,12 +992,12 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
       optionId: 'take-the-graveglass',
       name: 'The Graveglass Dead',
       sectionIds: ['graveglass-crypt'],
-      activation: { kind: 'circle', center: [4, 12], radius: 3.4 },
+      activation: { kind: 'circle', center: [13, 15], radius: 3.4 },
       objective: 'Take the graveglass from those still reflected inside it',
       spawns: [
-        { id: 'graveglass-cantor', kind: 'drownedCantor', implementation: 'existing', role: 'artillery', sectionId: 'graveglass-crypt', position: [4, 14.2], facingRadians: Math.PI, leashSectionIds: ['graveglass-crypt'], anchorId: 'graveglass-center' },
-        { id: 'graveglass-initiate-left', kind: 'ashenInitiate', implementation: 'existing', role: 'skirmisher', sectionId: 'graveglass-crypt', position: [2.5, 12], facingRadians: Math.PI, leashSectionIds: ['graveglass-crypt'], anchorId: 'graveglass-left' },
-        { id: 'graveglass-initiate-right', kind: 'ashenInitiate', implementation: 'existing', role: 'skirmisher', sectionId: 'graveglass-crypt', position: [5.5, 12], facingRadians: Math.PI, leashSectionIds: ['graveglass-crypt'], anchorId: 'graveglass-right', wakeDelaySeconds: 0.35 },
+        { id: 'graveglass-cantor', kind: 'drownedCantor', implementation: 'existing', role: 'artillery', sectionId: 'graveglass-crypt', position: [13, 17.2], facingRadians: Math.PI, leashSectionIds: ['graveglass-crypt'], anchorId: 'graveglass-center' },
+        { id: 'graveglass-initiate-left', kind: 'ashenInitiate', implementation: 'existing', role: 'skirmisher', sectionId: 'graveglass-crypt', position: [11.5, 15], facingRadians: Math.PI, leashSectionIds: ['graveglass-crypt'], anchorId: 'graveglass-left' },
+        { id: 'graveglass-initiate-right', kind: 'ashenInitiate', implementation: 'existing', role: 'skirmisher', sectionId: 'graveglass-crypt', position: [14.5, 15], facingRadians: Math.PI, leashSectionIds: ['graveglass-crypt'], anchorId: 'graveglass-right', wakeDelaySeconds: 0.35 },
       ],
     },
     {
@@ -1116,7 +1151,7 @@ export const FIRMAMENT_ROUTE = assertValidRouteDefinition({
           implementation: 'existing',
           role: 'guard',
           sectionId: 'fallen-orbit-bridge',
-          position: [-3, 15.2],
+          position: [-5.9, 14],
           facingRadians: Math.PI / 6,
           leashSectionIds: ['fallen-orbit-bridge'],
         },

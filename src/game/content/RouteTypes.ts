@@ -84,6 +84,12 @@ export type RouteElevationProfile = Readonly<{
   start: number;
   /** Height at the exit side, following cameraForward. */
   end: number;
+  /**
+   * Flat player-width landing reserved at both ends of a stair. The landing
+   * remains walkable but is omitted from the visible flight so adjacent floors
+   * overlap safely without drawing steps through their interiors.
+   */
+  landingDepth?: number;
 }>;
 
 export type RouteSectionDefinition = {
